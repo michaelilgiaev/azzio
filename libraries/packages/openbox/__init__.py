@@ -348,6 +348,22 @@ export DESKTOP_SESSION=openbox
 # The image honours the per-user `azzio wallpaper` pointer, falling back to "years".
 """ + _feh_wallpaper_line() + """
 
+# Hand DISPLAY/XAUTHORITY to the systemd USER manager and the D-Bus activation
+# environment BEFORE OpenBox starts. Arch's stock startx sources
+# /etc/X11/xinit/xinitrc.d/50-systemd-user.sh (which runs exactly these two lines) to do
+# this, but OUR ~/.xinitrc replaces the stock xinitrc wholesale and never sources that
+# drop-in dir -- so without this the user manager has NO DISPLAY. That silently breaks
+# every D-Bus/systemd-ACTIVATED user service that needs X: chiefly xdg-desktop-portal-gtk
+# (Type=dbus), which then exits 1 with "cannot open display" the moment an app calls the
+# FileChooser portal. Librewolf's "Save image as" routes through that portal (auto mode,
+# the portal FRONTEND is up), so with no backend the SAVE DIALOG NEVER APPEARS -- the
+# reported "Save image as doesn't work". Seeding the env here lets the backend start on
+# demand, so the file picker works. XAUTHORITY is exported by startx; guard the
+# dbus-update tool so a missing binary never breaks startup.
+systemctl --user import-environment DISPLAY XAUTHORITY
+command -v dbus-update-activation-environment >/dev/null 2>&1 && \\
+    dbus-update-activation-environment DISPLAY XAUTHORITY
+
 # Replace this shell with the OpenBox X11 session; when OpenBox exits, X exits and
 # control returns to the login shell (which, per bash_profile, logs out the tty).
 exec openbox-session

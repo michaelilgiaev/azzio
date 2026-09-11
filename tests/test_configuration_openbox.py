@@ -424,6 +424,28 @@ def test_xinitrc_prepaints_wallpaper_before_exec():
     assert feh_idx < exec_idx
 
 
+def test_xinitrc_seeds_systemd_user_env_before_exec():
+    # ROOT CAUSE of the reported "Save image as doesn't work" in Librewolf: our ~/.xinitrc
+    # replaces Arch's stock xinitrc wholesale and never sources
+    # /etc/X11/xinit/xinitrc.d/50-systemd-user.sh, so the systemd USER manager (and the
+    # D-Bus activation environment) had NO DISPLAY. xdg-desktop-portal-gtk (Type=dbus,
+    # D-Bus-activated) then exited 1 with "cannot open display" whenever an app invoked the
+    # FileChooser portal -- and Librewolf routes Save-image-as through that portal, so the
+    # save dialog never mapped. The xinitrc must import DISPLAY (and XAUTHORITY) into BOTH
+    # the systemd user manager and the dbus activation env, BEFORE exec-ing OpenBox so the
+    # portal backend can start on demand.
+    out = desktop.xinitrc()
+    assert "systemctl --user import-environment DISPLAY XAUTHORITY" in out
+    assert "dbus-update-activation-environment DISPLAY XAUTHORITY" in out
+    # The dbus-update tool is guarded so a missing binary never breaks session startup.
+    assert "command -v dbus-update-activation-environment" in out
+    # Must run BEFORE the session starts, else the activated portal backend is spawned
+    # by the still-DISPLAY-less manager and the seeding is too late to help it.
+    import_idx = out.index("systemctl --user import-environment")
+    exec_idx = out.index("exec openbox-session")
+    assert import_idx < exec_idx
+
+
 # --- SPICE guest agent: the pointer-regression fix ---------------------------
 
 def test_spice_vdagent_started_in_both_autostarts():
