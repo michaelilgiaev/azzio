@@ -7,7 +7,7 @@ username, a user password, a root password, and a timezone, then applies them in
 chosen zone). These pin the load-bearing bits of those three bash fragments:
 
   * env pre-seed hooks exist for every field AND an interactive fallback (`read`) is kept, so
-    a plain `azzio-install --cli` over SSH still works step by step.
+    a plain `azzioinstall --cli` over SSH still works step by step.
   * passwords are read hidden (`read -s`), confirmed, and never written to a world-readable
     file; the chroot shreds the plaintext files after chpasswd.
   * the chroot applies user + root passwords via chpasswd, renames the copied `main` account
@@ -54,7 +54,7 @@ def test_collect_reads_passwords_hidden_and_confirms():
 
 
 def test_collect_never_prompts_for_fullname():
-    # SPEC ("azzio-install --cli ... remove full name prompting"): the full name is a cosmetic
+    # SPEC ("azzioinstall --cli ... remove full name prompting"): the full name is a cosmetic
     # GECOS field and is NEVER prompted. It is taken from AZ_INSTALL_FULLNAME when set and
     # otherwise left blank -- so the collect step has NO interactive `read` for it, and the
     # else-branch simply blanks az_fullname and reports it skipped.
@@ -121,7 +121,7 @@ def test_collect_fullname_honoured_when_preseeded(tmp_path):
 
 
 def test_collect_skips_password_prompts_under_star_password():
-    # STAR-PASSWORD convention (`--auto` sets AZ_INSTALL_STAR_PASSWORD): the password prompts
+    # STAR-PASSWORD convention (opt-in via AZ_INSTALL_STAR_PASSWORD): the password prompts
     # must be SKIPPED entirely (they would block an unattended run) and a marker exported so
     # the write/chroot steps apply a literal '*'. Assert the collect step gates the whole
     # password section on the env var and sets az_star_password, exporting it downstream.
@@ -133,8 +133,8 @@ def test_collect_skips_password_prompts_under_star_password():
 
 
 def test_collect_star_password_flow_is_noninteractive(tmp_path):
-    # Behavioural: with AZ_INSTALL_STAR_PASSWORD (and the other fields pre-seeded, as `--auto`
-    # provides) the collect step must run to completion WITHOUT reading a password from stdin.
+    # Behavioural: with AZ_INSTALL_STAR_PASSWORD (and the other fields pre-seeded, as an
+    # unattended run provides) the collect step must run to completion WITHOUT reading a password from stdin.
     # Drive it with stdin closed; it must exit 0 and set az_star_password=1. A regression that
     # re-introduced a password `read` here would hang/fail (empty stdin -> non-zero), catching
     # the "unattended install blocks on a hidden password prompt" bug.
@@ -214,7 +214,7 @@ def test_write_persists_fields_and_secures_passwords():
 
 
 def test_write_persists_only_a_marker_under_star_password():
-    # Under the STAR-PASSWORD convention (`--auto`) NO plaintext password is persisted: the
+    # Under the STAR-PASSWORD convention (AZ_INSTALL_STAR_PASSWORD) NO plaintext password is persisted: the
     # write step branches on $az_star_password and drops just a `star_password` marker so the
     # chroot writes a literal '*' for user + root. The plaintext files (and their umask 077
     # subshells) live only in the else branch, so a star install never lands a secret on disk.
@@ -241,7 +241,7 @@ def test_chroot_sets_both_passwords_via_chpasswd_and_shreds():
 
 
 def test_chroot_writes_star_password_for_user_and_root_when_requested():
-    # STAR-PASSWORD convention (`--auto`): when the star_password marker is present the chroot
+    # STAR-PASSWORD convention (AZ_INSTALL_STAR_PASSWORD): when the star_password marker is present the chroot
     # writes a literal '*' into the shadow field for BOTH the chosen login and root via
     # `usermod -p '*'` (the Ubuntu/casper standard: an invalid hash -> no password login, but
     # the account is NOT locked, so tty1 autologin + NOPASSWD sudo keep the box usable). It

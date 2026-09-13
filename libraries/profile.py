@@ -75,11 +75,11 @@ FILE_PERMISSIONS = {
     # here keep an explicit mode. Without this entry the wrapper ships 0644
     # (non-executable), so the autostart's `[ -x ... ]` guard skips it and Calamares
     # never auto-launches. THIS is what breaks the live installer.
-    "/usr/local/bin/azzio-install": "0:0:755",
+    "/usr/local/bin/azzioinstall": "0:0:755",
     "/usr/local/bin/azzio": "0:0:755",
     # The Azzio application-menu launcher (run by the Super key via OpenBox's rc.xml
     # keybind). SAME archiso mode-normalization as
-    # azzio-install above: application_menu.PLAN emits it 0755, but the squashfs ships
+    # azzioinstall above: application_menu.PLAN emits it 0755, but the squashfs ships
     # it 0644 (non-executable) unless pinned here -- and then the Super key runs a
     # non-executable file and the menu never opens.
     "/usr/local/bin/azzio-application-menu": "0:0:755",
@@ -93,13 +93,13 @@ FILE_PERMISSIONS = {
     "/usr/local/bin/azzio-window-switcher": "0:0:755",
     # The Azzio timedate launcher (run by azzio-timedate.service, which ExecStart's it
     # to serve the Flask Time + Calendar home page at localhost:49154). SAME archiso mode-
-    # normalization as azzio-install above: timedate.PLAN emits it 0755, but the squashfs
+    # normalization as azzioinstall above: timedate.PLAN emits it 0755, but the squashfs
     # ships it 0644 (non-executable) unless pinned here -- and then systemd fails the unit
     # with status=203/EXEC (Permission denied) and the home page never listens, so a new
     # tab / the browser home page lands on a dead port. Verified on the built ISO.
     "/usr/local/bin/azzio-timedate": "0:0:755",
     # The Azzio `passwords` launcher (the encrypted terminal password manager the user
-    # runs by typing `passwords`). SAME archiso mode-normalization as azzio-install above:
+    # runs by typing `passwords`). SAME archiso mode-normalization as azzioinstall above:
     # packages/passwords/packaging.PLAN emits it 0755, but the squashfs ships it 0644
     # (non-executable) unless pinned here -- and then typing `passwords` fails with
     # "Permission denied" (the shell needs the exec bit to run it) on BOTH the live ISO and
@@ -107,7 +107,7 @@ FILE_PERMISSIONS = {
     "/usr/local/bin/passwords": "0:0:755",
     # The Azzio `backup`/`unpack` launchers (the home-directory backup the user runs by
     # typing `backup`, and the restore command `unpack`). SAME archiso mode-normalization as
-    # azzio-install/passwords above: packages/backup/packaging.emit_plan() emits both 0755,
+    # azzioinstall/passwords above: packages/backup/packaging.emit_plan() emits both 0755,
     # but the squashfs ships them 0644 (non-executable) unless pinned here -- and then typing
     # `backup` (or `unpack`) fails with "command not found"/"Permission denied" even by full
     # path (this was the last build's bug #1). Root-owned on PATH, so every user gets them.
@@ -162,15 +162,15 @@ FILE_PERMISSIONS = {
     "/home/main/.config/openbox/autostart": "1000:998:755",
     "/etc/skel/.config/openbox/autostart": "0:0:755",
     # The live-session Desktop "Azzio Linux Installer" launcher. Same archiso mode-
-    # normalization as azzio-install above: compiler.py emits it 0755, but the squashfs
+    # normalization as azzioinstall above: compiler.py emits it 0755, but the squashfs
     # ships it 0644 unless pinned here. Shipping it EXECUTABLE means a file manager that
     # honours the exec bit launches it on double-click without a "not trusted" prompt.
     # Both the live-user copy (uid 1000:998) and the /etc/skel copy (root-owned) are
     # pinned.
-    "/home/main/Desktop/azzio-install.desktop": "1000:998:755",
-    "/etc/skel/Desktop/azzio-install.desktop": "0:0:755",
+    "/home/main/Desktop/azzioinstall.desktop": "1000:998:755",
+    "/etc/skel/Desktop/azzioinstall.desktop": "0:0:755",
     # Vendored ckbcomp (libraries/packages/calamares/ckbcomp.py), a Python 3 port of the
-    # upstream Perl ckbcomp. Same archiso mode-normalization as azzio-install above: without
+    # upstream Perl ckbcomp. Same archiso mode-normalization as azzioinstall above: without
     # an explicit 0755 here it ships 0644, Calamares' `QProcess::start("ckbcomp")`
     # cannot execute it, and the keyboard-page preview stays BLANK ("ckbcomp not
     # found, keyboard preview disabled"). This entry keeps the exec bit so the preview

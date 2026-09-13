@@ -72,9 +72,9 @@ def test_plan_has_exactly_nineteen_entries():
     #  13. ~/.config/openbox/environment            (XDG_CURRENT_DESKTOP + scale env)
     #  14. /usr/local/share/azzio/openbox-autostart-installed (staged "installed" autostart)
     #  15. ~/.local/share menu usage seed            (default menu ordering)
-    #  16. /usr/share/applications/azzio-install.desktop (menu re-open entry, system)
-    #  17. ~/Desktop/azzio-install.desktop          (double-clickable installer launcher)
-    #  18. /usr/local/bin/azzio-install             (privileged Calamares wrapper)
+    #  16. /usr/share/applications/azzioinstall.desktop (menu re-open entry, system)
+    #  17. ~/Desktop/azzioinstall.desktop          (double-clickable installer launcher)
+    #  18. /usr/local/bin/azzioinstall             (privileged Calamares wrapper)
     #  19. /usr/local/bin/azzio                      (guest-side command line interface)
     # (entries 3-9 are the system theme: dark is the default; `azzio theme` toggles it; entry
     # 10 is the compositor config that kills the picom fade + transparent-titlebar defaults;
@@ -138,12 +138,12 @@ def test_install_wrapper_entry_is_root_owned_exec():
 
 
 def test_install_wrapper_has_gui_cli_auto_and_help():
-    # azzio-install is a dispatcher over three explicit modes -- GUI (Calamares), the
-    # scripted CLI installer, and the fully-unattended --auto -- plus a --help. There is NO
+    # azzioinstall is a dispatcher over three explicit modes -- GUI (Calamares), the
+    # scripted CLI installer, and the fully-unattended --instant -- plus a --help. There is NO
     # default action: a bare invocation shows help (see below). Assert all surfaces exist.
     w = desktop.install_wrapper_sh()
-    assert "--help" in w and "Usage: azzio-install" in w
-    assert "--gui" in w and "--cli" in w and "--auto" in w
+    assert "--help" in w and "Usage: azzioinstall" in w
+    assert "--gui" in w and "--cli" in w and "--instant" in w
     # GUI path still launches Calamares the same way.
     assert "calamares" in w
     # CLI path runs the scripted installer baked under /root/azzio.
@@ -151,7 +151,7 @@ def test_install_wrapper_has_gui_cli_auto_and_help():
 
 
 def test_install_wrapper_has_no_default_action_and_shows_help_on_no_args():
-    # PROMPT.md: `azzio-install` (no option) and `--help`/`-h` must ECHO the help text,
+    # PROMPT.md: `azzioinstall` (no option) and `--help`/`-h` must ECHO the help text,
     # NOT start an install. The wrapper therefore has NO display-detection default anymore;
     # a mode must be named explicitly (-g/-c/-a). Assert the dispatch defaults to `usage`
     # (the `*)` arm) and that the old auto-detect branch is gone.
@@ -167,11 +167,11 @@ def test_install_wrapper_mode_flag_aliases():
     # PROMPT.md requires short + long aliases for each mode:
     #   -g / --gui / --graphical-user-interface
     #   -c / --cli / --command-line-interface
-    #   -a / --auto / --automatic
+    #   -a / --instant / --automatic
     w = desktop.install_wrapper_sh()
     assert "-g|--gui|--graphical-user-interface) mode=gui" in w
     assert "-c|--cli|--command-line-interface) mode=cli" in w
-    assert "-a|--auto|--automatic) mode=auto" in w
+    assert "-a|--instant|--automatic) mode=auto" in w
     # -h / --help still print help.
     assert "-h|--help) usage; exit 0 ;;" in w
 
@@ -185,12 +185,12 @@ def test_install_wrapper_disk_preseeds_the_installer():
 
 
 def test_install_wrapper_auto_is_fully_unattended_with_fixed_defaults():
-    # PROMPT.md: `--auto` applies defaults with no prompts (each overridable by a sub-flag, see
+    # PROMPT.md: `--instant` applies defaults with no prompts (each overridable by a sub-flag, see
     # test_install_wrapper_auto_sub_flags_*). run_auto resolves every answer -- via the
     # `${az_opt_*:-DEFAULT}` idiom so an omitted flag keeps its default -- then delegates to the
     # single scripted-installer path (run_cli). Assert the DEFAULTS: largest disk, hostname
     # azzio, user main, blank full name, Asia/Jerusalem, btrfs, and REAL "admin" passwords for
-    # user and root (the spec's flag table lists admin as the password default; --auto no longer
+    # user and root (the spec's flag table lists admin as the password default; --instant no longer
     # uses the '*' casper convention). DHCP is the installed default, so nothing to assert there.
     w = desktop.install_wrapper_sh()
     assert "run_auto()" in w
@@ -200,7 +200,7 @@ def test_install_wrapper_auto_is_fully_unattended_with_fixed_defaults():
     assert "export AZ_INSTALL_FULLNAME=" in w             # blank -> skipped (never prompted)
     assert 'export AZ_INSTALL_TIMEZONE="${az_opt_timezone:-Asia/Jerusalem}"' in w
     assert "export AZ_INSTALL_FILESYSTEM=btrfs" in w      # parity with the Calamares GUI
-    # Real passwords, defaulting to admin; NO star/casper knob under --auto anymore.
+    # Real passwords, defaulting to admin; NO star/casper knob under --instant anymore.
     assert 'export AZ_INSTALL_PASSWORD="${az_opt_user_password:-admin}"' in w
     assert "export AZ_INSTALL_STAR_PASSWORD=1" not in w
     # run_auto funnels into the single install path.
@@ -210,7 +210,7 @@ def test_install_wrapper_auto_is_fully_unattended_with_fixed_defaults():
 
 
 def test_install_wrapper_auto_password_defaults_admin_shared():
-    # Default password policy for a bare `azzio-install --auto`: user "admin", and root SHARES
+    # Default password policy for a bare `azzioinstall --instant`: user "admin", and root SHARES
     # it (--share-username-root-password default True). Assert the share default and both arms:
     # True -> root == user password; anything else -> root == --root-password (default admin).
     w = desktop.install_wrapper_sh()
@@ -220,8 +220,8 @@ def test_install_wrapper_auto_password_defaults_admin_shared():
 
 
 def test_install_wrapper_auto_sub_flags_are_parsed():
-    # The seven --auto sub-flags must each be parsed in BOTH the `--flag value` and `--flag=value`
-    # forms into an az_opt_* the resolver consumes. Assert every flag token appears.
+    # The eight --instant sub-flags must each be parsed in BOTH the `--flag value` and
+    # `--flag=value` forms into an az_opt_* the resolver consumes. Assert every flag token appears.
     w = desktop.install_wrapper_sh()
     for flag, var in (
         ("--hostname", "az_opt_hostname"),
@@ -231,6 +231,7 @@ def test_install_wrapper_auto_sub_flags_are_parsed():
         ("--root-password", "az_opt_root_password"),
         ("--timezone", "az_opt_timezone"),
         ("--disk", "az_opt_disk"),
+        ("--final", "az_opt_final"),
     ):
         assert f"{flag})" in w, f"missing space-form parse for {flag}"
         assert f"{flag}=*)" in w, f"missing =-form parse for {flag}"
@@ -238,12 +239,12 @@ def test_install_wrapper_auto_sub_flags_are_parsed():
 
 
 def test_install_wrapper_auto_sub_flags_require_auto():
-    # SPEC: "if --auto was not passed in then these flags shouldn't work." The wrapper must
-    # REJECT a sub-flag given without --auto (exit non-zero + help), not silently ignore it.
+    # SPEC: "if --instant was not passed in then these flags shouldn't work." The wrapper must
+    # REJECT a sub-flag given without --instant (exit non-zero + help), not silently ignore it.
     # Assert the gate exists and names the requirement.
     w = desktop.install_wrapper_sh()
     assert 'if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then' in w
-    assert "require --auto" in w
+    assert "require --instant" in w
     # --disk stays allowed with --cli (the long-standing combo), so the gate excludes that case.
     assert '[ "$mode" != "cli" ]' in w
 
@@ -263,6 +264,7 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
         'HOST=${AZ_INSTALL_HOSTNAME-} USER=${AZ_INSTALL_USERNAME-} '
         'FULL=[${AZ_INSTALL_FULLNAME-}] TZ=${AZ_INSTALL_TIMEZONE-} FS=${AZ_INSTALL_FILESYSTEM-} '
         'PW=${AZ_INSTALL_PASSWORD-} ROOTPW=${AZ_INSTALL_ROOT_PASSWORD-} '
+        'FINAL=${AZ_INSTALL_FINAL-} '
         'STAR=${AZ_INSTALL_STAR_PASSWORD-}"; exit 0; }\n    exec true \\',
         1,
     ).replace("if ! sudo test -r", "if ! true && ! sudo test -r")
@@ -277,16 +279,18 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
         m = re.search(rf"\b{key}=(\[[^\]]*\]|\S*)", out)
         return m.group(1) if m else None
 
-    # bare --auto -> admin/admin shared, largest disk, azzio/main, no star.
-    r = run(["--auto"])
+    # bare --instant -> admin/admin shared, largest disk, azzio/main, no star, idle final.
+    r = run(["--instant"])
     assert r.returncode == 0, r.stderr
     assert f(r.stdout, "CHOICE") == "1"
     assert f(r.stdout, "HOST") == "azzio" and f(r.stdout, "USER") == "main"
     assert f(r.stdout, "PW") == "admin" and f(r.stdout, "ROOTPW") == "admin"
     assert f(r.stdout, "STAR") == "" and f(r.stdout, "FULL") == "[]"
+    # --final omitted -> default idle.
+    assert f(r.stdout, "FINAL") == "idle"
 
     # full overrides (both = and space forms exercised elsewhere; = here).
-    r = run(["--auto", "--disk=sda", "--hostname=box", "--username=me",
+    r = run(["--instant", "--disk=sda", "--hostname=box", "--username=me",
              "--username-password=secret", "--share-username-root-password=False",
              "--root-password=rootsecret", "--timezone=Europe/London"])
     assert r.returncode == 0, r.stderr
@@ -296,16 +300,35 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
     assert f(r.stdout, "TZ") == "Europe/London"
 
     # share True -> root reuses user password.
-    r = run(["--auto", "--username-password=hunter2", "--share-username-root-password=True"])
+    r = run(["--instant", "--username-password=hunter2", "--share-username-root-password=True"])
     assert f(r.stdout, "PW") == "hunter2" and f(r.stdout, "ROOTPW") == "hunter2"
 
     # --disk=auto keeps largest.
-    r = run(["--auto", "--disk=auto"])
+    r = run(["--instant", "--disk=auto"])
     assert f(r.stdout, "CHOICE") == "1" and f(r.stdout, "DISK") == ""
 
-    # gate: sub-flag without --auto exits 2.
+    # --final options: reboot, restart (alias -> reboot), shutdown.
+    r = run(["--instant", "--final=reboot"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "FINAL") == "reboot"
+    r = run(["--instant", "--final=restart"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "FINAL") == "reboot"   # restart is an alias for reboot
+    r = run(["--instant", "--final=shutdown"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "FINAL") == "shutdown"
+
+    # --final with a bogus value is rejected early (rc 2), not silently idled.
+    r = run(["--instant", "--final=bogus"])
+    assert r.returncode == 2 and "--final must be" in r.stderr
+
+    # gate: sub-flag without --instant exits 2.
     r = run(["--hostname=x"])
-    assert r.returncode == 2 and "require --auto" in r.stderr
+    assert r.returncode == 2 and "require --instant" in r.stderr
+
+    # gate: --final also requires --instant.
+    r = run(["--final=reboot"])
+    assert r.returncode == 2 and "require --instant" in r.stderr
 
     # --cli --disk still works (the allowed combo).
     r = run(["--cli", "--disk", "sdb"])
@@ -313,7 +336,7 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
     assert f(r.stdout, "CHOICE") == "2" and f(r.stdout, "DISK") == "sdb"
 
     # missing value errors.
-    r = run(["--auto", "--hostname"])
+    r = run(["--instant", "--hostname"])
     assert r.returncode == 2 and "requires a value" in r.stderr
 
 
@@ -321,7 +344,7 @@ def test_install_wrapper_forwards_whitespace_values_intact(tmp_path):
     # REGRESSION (adversary-found): run_cli forwards each AZ_INSTALL_* across `sudo -E env` with
     # `${VAR:+"VAR=$VAR"}`. The double quotes INSIDE the :+ are load-bearing -- without them a
     # value with a space word-splits and `env` treats the tail as the command to exec, so
-    # `--auto --username-password='correct horse'` died with `env: 'horse': No such file or
+    # `--instant --username-password='correct horse'` died with `env: 'horse': No such file or
     # directory` (exit 127) and the installer never ran. This drives the REAL forwarding (sudo
     # dropped, env kept, the target replaced by a probe that dumps the AZ_* it actually received)
     # and asserts a whitespace password/hostname arrive as ONE value in the child environment.
@@ -339,7 +362,7 @@ def test_install_wrapper_forwards_whitespace_values_intact(tmp_path):
 
     # A user password with a space, shared to root by default.
     r = subprocess.run(
-        ["bash", str(path), "--auto", "--username-password=correct horse"],
+        ["bash", str(path), "--instant", "--username-password=correct horse"],
         capture_output=True, text=True, timeout=20)
     assert r.returncode == 0, f"whitespace password broke env forwarding: rc={r.returncode} {r.stderr}"
     assert "AZ_INSTALL_PASSWORD=[correct horse]" in r.stdout, r.stdout
@@ -347,7 +370,7 @@ def test_install_wrapper_forwards_whitespace_values_intact(tmp_path):
 
     # An independent root password with a space (share=False).
     r = subprocess.run(
-        ["bash", str(path), "--auto", "--share-username-root-password=False",
+        ["bash", str(path), "--instant", "--share-username-root-password=False",
          "--root-password=my root pw", "--username-password=user pw"],
         capture_output=True, text=True, timeout=20)
     assert r.returncode == 0, r.stderr
@@ -433,7 +456,7 @@ def test_root_owned_dests_are_wrapper_cli_menu_entry_installed_autostart_dconf_a
     assert set(root_dests) == {
         desktop.INSTALL_WRAPPER_PATH,
         desktop.AZZIO_BIN_PATH,
-        "/usr/share/applications/azzio-install.desktop",
+        "/usr/share/applications/azzioinstall.desktop",
         desktop.INSTALLED_AUTOSTART_STAGING_PATH,
         desktop.DCONF_THEME_KEYFILE_PATH,
         desktop.DCONF_PROFILE_USER_PATH,
@@ -446,7 +469,7 @@ def test_desktop_launcher_is_on_the_desktop_executable_and_home_owned():
     # executable (0o755, so a file manager trusts it), and be handed to the live user.
     entry = next(
         e for e in desktop.PLAN
-        if e["dest"] == f"{desktop.HOME}/Desktop/azzio-install.desktop"
+        if e["dest"] == f"{desktop.HOME}/Desktop/azzioinstall.desktop"
     )
     assert entry["builder"] is desktop.desktop_installer_launcher
     assert entry["mode"] == 0o755
@@ -457,7 +480,7 @@ def test_desktop_launcher_content_names_installer_and_wrapper_and_icon():
     body = desktop.desktop_installer_launcher()
     assert "[Desktop Entry]" in body
     assert "Name=Azzio Linux Installer" in body
-    # Exec names `--gui` explicitly (azzio-install has no default action now, so a bare
+    # Exec names `--gui` explicitly (azzioinstall has no default action now, so a bare
     # invocation would only print help -- the launcher must ask for the GUI installer).
     assert f"Exec={desktop.INSTALL_WRAPPER_PATH} --gui" in body
     assert f"Icon={desktop.INSTALLER_ICON_NAME}" in body
@@ -477,7 +500,7 @@ def test_installer_launchers_all_use_the_azzio_icon():
 
 
 def test_installer_launchers_all_invoke_gui_mode():
-    # Neither .desktop launcher may rely on a default action -- azzio-install has none now.
+    # Neither .desktop launcher may rely on a default action -- azzioinstall has none now.
     # Both the Desktop launcher and the application-menu entry must Exec `--gui` so a
     # double-click / menu-open starts the Calamares GUI (not the help text).
     for body in (
@@ -1255,7 +1278,7 @@ def test_autostart_starts_the_application_menu_daemon():
 def test_autostart_launches_the_installer_once():
     # The Calamares installer auto-opens ONCE, a couple seconds in (Manjaro-style first-run),
     # via the privileged wrapper -- the same wrapper the menu/Desktop launchers use. It must
-    # name `--gui` explicitly now: azzio-install has NO default action (a bare invocation
+    # name `--gui` explicitly now: azzioinstall has NO default action (a bare invocation
     # only prints help), so the first-run autostart must ask for GUI mode by name.
     out = desktop.openbox_autostart()
     assert f"( sleep 2; '{desktop.INSTALL_WRAPPER_PATH}' --gui )" in out
@@ -1358,7 +1381,7 @@ def test_install_menu_desktop_is_system_owned_conf():
     # /usr/share/applications (one file for all users), root-owned, plain data (0o644).
     entry = next(
         e for e in desktop.PLAN
-        if e["dest"] == "/usr/share/applications/azzio-install.desktop"
+        if e["dest"] == "/usr/share/applications/azzioinstall.desktop"
     )
     assert entry["builder"] is desktop.install_menu_desktop
     assert entry["mode"] == 0o644
@@ -1879,7 +1902,7 @@ def test_bash_profile_legacy_keys_not_emitted_when_non_interactive(tmp_path):
 # --- Branding / wrapper / wallpaper constants -------------------------------
 
 def test_install_wrapper_path_value():
-    assert desktop.INSTALL_WRAPPER_PATH == "/usr/local/bin/azzio-install"
+    assert desktop.INSTALL_WRAPPER_PATH == "/usr/local/bin/azzioinstall"
 
 
 def test_wallpaper_image_file_is_the_inner_years_png():

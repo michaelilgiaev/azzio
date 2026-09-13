@@ -25,7 +25,7 @@ from __future__ import annotations
 LIVE_USER = "main"
 
 # The live session ships an "Azzio Linux Installer" launcher ON the Desktop, a matching
-# entry in the application menu (/usr/share/applications/azzio-install.desktop), and its
+# entry in the application menu (/usr/share/applications/azzioinstall.desktop), and its
 # OpenBox autostart (~/.config/openbox/autostart) opens Calamares once at login AND sets
 # a fixed us,il keyboard. The OFFLINE install copies the live /home/main and the live
 # system tree VERBATIM via unpackfs (and `useradd -m` reuses that home), so WITHOUT the
@@ -36,8 +36,8 @@ LIVE_USER = "main"
 # NOT appear anywhere post-installation, so the menu entry (INSTALLER_MENU_DESKTOP, below)
 # is removed too -- calamares itself is additionally try_removed by the packages module,
 # which would otherwise leave that menu entry a dead launcher.
-INSTALLER_DESKTOP_LAUNCHER = f"/home/{LIVE_USER}/Desktop/azzio-install.desktop"
-INSTALLER_SKEL_LAUNCHER = "/etc/skel/Desktop/azzio-install.desktop"
+INSTALLER_DESKTOP_LAUNCHER = f"/home/{LIVE_USER}/Desktop/azzioinstall.desktop"
+INSTALLER_SKEL_LAUNCHER = "/etc/skel/Desktop/azzioinstall.desktop"
 
 # The OpenBox session autostart the target inherits from the live rootfs. It carries two
 # LIVE-ONLY behaviours that must not survive an install:
@@ -64,10 +64,10 @@ INSTALLED_AUTOSTART_SRC = _openbox.INSTALLED_AUTOSTART_STAGING_PATH
 # Sourced from openbox.py so the path the live medium SHIPS and the path this step DELETES
 # are the same string.
 INSTALLER_MENU_DESKTOP = _openbox.INSTALL_MENU_DESKTOP_PATH
-# The privileged Calamares launcher wrapper (/usr/local/bin/azzio-install). It makes sense on
+# The privileged Calamares launcher wrapper (/usr/local/bin/azzioinstall). It makes sense on
 # the LIVE medium -- the OpenBox autostart and both installer launchers (Desktop + app menu)
 # exec it -- but must NOT survive onto the INSTALLED system: once Calamares has installed
-# Azzio there is nothing left to install, so a leftover "azzio-install" wrapper is dead
+# Azzio there is nothing left to install, so a leftover "azzioinstall" wrapper is dead
 # weight (and the app-menu / Desktop launchers that called it are already removed above). The
 # OFFLINE unpackfs install copies the whole live rootfs verbatim, so this root-owned file lands
 # on the target and this step must delete it. Sourced from openbox.py so the path the live
@@ -78,7 +78,7 @@ INSTALLER_WRAPPER = _openbox.INSTALL_WRAPPER_PATH
 def installer_cleanup_command(home: str) -> str:
     """A single command block (runs in the target chroot) that makes the INSTALLED system's
     OpenBox session correct: no "Azzio Linux Installer" ANYWHERE (no Desktop icon, no
-    application-menu entry, and no `azzio-install` wrapper), no first-run installer at login,
+    application-menu entry, and no `azzioinstall` wrapper), no first-run installer at login,
     and the region keyboard (not the live us,il) in effect.
 
     `home` is the ACCOUNT HOME the installed OpenBox session reads (its Desktop launcher and
@@ -93,7 +93,7 @@ def installer_cleanup_command(home: str) -> str:
         passes "/home/$az_login" (a shell variable resolved inside arch-chroot).
 
     Deletes the Desktop launcher from `home` AND /etc/skel, the system-wide application-menu
-    launcher, AND the /usr/local/bin/azzio-install wrapper those launchers exec (dead on an
+    launcher, AND the /usr/local/bin/azzioinstall wrapper those launchers exec (dead on an
     installed system), then OVERWRITES the inherited OpenBox autostart (home + skel) with the
     "installed" variant staged on the ISO -- which drops the two live-only lines (the fixed
     us,il setxkbmap and the first-run Calamares launch) while keeping wallpaper/xcape/
@@ -106,7 +106,7 @@ def installer_cleanup_command(home: str) -> str:
     (a normal shell, no macro-expander), where a `$az_login` in `home` is a legitimate shell
     variable. So the shared body is identical; only the caller's `home` string carries (or
     does not carry) a `$`."""
-    desktop_launcher = f"{home}/Desktop/azzio-install.desktop"
+    desktop_launcher = f"{home}/Desktop/azzioinstall.desktop"
     autostart = f"{home}/.config/openbox/autostart"
     return (
         "set -e\n"
@@ -117,7 +117,7 @@ def installer_cleanup_command(home: str) -> str:
         # would just leave a dead launcher). `rm -f` is a no-op if it is already absent.
         f"rm -f {INSTALLER_MENU_DESKTOP}\n"
         # Remove the privileged launcher wrapper itself: on an installed system there is
-        # nothing left to install, so /usr/local/bin/azzio-install is dead weight (and every
+        # nothing left to install, so /usr/local/bin/azzioinstall is dead weight (and every
         # launcher that called it is removed above). `rm -f` is a no-op if it is already gone.
         f"rm -f {INSTALLER_WRAPPER}\n"
         # Replace the inherited live autostart (home + skel) with the installed variant

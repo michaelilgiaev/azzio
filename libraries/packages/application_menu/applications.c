@@ -146,7 +146,7 @@ char *az_category_type(char **categories) {
 /* --- Apps hidden from OUR menu (not uninstalled) ------------------------- *
  * INSTALLER FIX: calamares.desktop (stock "Install System", generic icon,
  * Exec=pkexec calamares which is DEAD in this OpenBox session -- no polkit
- * agent) is now HIDDEN, and azzio-install.desktop (Name "Azzio Linux
+ * agent) is now HIDDEN, and azzioinstall.desktop (Name "Azzio Linux
  * Installer", Icon azzio-installer, passwordless-sudo Exec that works) is NO
  * LONGER hidden, so it shows in the menu and re-opening works. */
 static const char *HIDDEN_IDS[] = {
@@ -221,7 +221,7 @@ gboolean az_apps_pin_first(GPtrArray *apps, const char *desktop_id) {
 
 /* The .desktop id of the Azzio installer, pinned to the top in a live session. */
 const char *az_installer_desktop_id(void) {
-    return "azzio-install.desktop";
+    return "azzioinstall.desktop";
 }
 
 /* --- XDG application dirs (most-specific first) -------------------------- */

@@ -61,10 +61,10 @@ echo -e "${RED}WARNING:${RESET} This will erase everything on the targeted disk 
 echo "Select an installation option:"
 echo "1. Automatically detect largest disk (excludes USB drives) and install azzio"
 echo "2. Manually select disk to erase and install azzio"
-# Non-interactive pre-seed (used by `azzio-install --cli --auto` / `--disk`, so an SSH
+# Non-interactive pre-seed (used by `azzioinstall --instant` / `--disk`, so an SSH
 # install can run unattended): if AZ_INSTALL_CHOICE is set we use it instead of prompting;
 # AZ_INSTALL_DISK pre-answers the manual device prompt. Unset -> the interactive read runs,
-# so a plain `azzio-install --cli` over SSH still works step by step.
+# so a plain `azzioinstall --cli` over SSH still works step by step.
 if [ -n "$AZ_INSTALL_CHOICE" ]; then
     choice="$AZ_INSTALL_CHOICE"
     echo "Enter option (1 or 2): $choice (pre-seeded)"
@@ -146,8 +146,8 @@ if [ -d "/sys/firmware/efi" ]; then
   is_uefi=1
 fi
 
-# Root filesystem. Defaults to ext4 (a plain `azzio-install --cli` is unchanged); the
-# `--auto` mode pre-seeds AZ_INSTALL_FILESYSTEM=btrfs for parity with the Calamares GUI,
+# Root filesystem. Defaults to ext4 (a plain `azzioinstall --cli` is unchanged); the
+# `--instant` mode pre-seeds AZ_INSTALL_FILESYSTEM=btrfs for parity with the Calamares GUI,
 # whose defaultFileSystemType is btrfs. Only ext4/btrfs are supported by this scripted
 # path (a flat filesystem -- no subvolumes; the rsync clone has no subvolume layout).
 # Validate up front, BEFORE the wipe, so a typo aborts while the disk is still untouched
@@ -155,7 +155,7 @@ fi
 root_fs="${AZ_INSTALL_FILESYSTEM:-ext4}"
 case "$root_fs" in
     ext4|btrfs) ;;
-    *) echo "azzio-install: unsupported AZ_INSTALL_FILESYSTEM '$root_fs' (use ext4 or btrfs)"; exit 1 ;;
+    *) echo "azzioinstall: unsupported AZ_INSTALL_FILESYSTEM '$root_fs' (use ext4 or btrfs)"; exit 1 ;;
 esac
 
 # Collect the account / hostname / timezone answers (Calamares Users + Location parity) NOW,
@@ -198,7 +198,7 @@ if [ $is_uefi -eq 1 ]; then
   mkfs.fat -F32 "$part1"
 fi
 # Root filesystem per AZ_INSTALL_FILESYSTEM (validated above): ext4 default, or btrfs for
-# `--auto` (parity with the Calamares GUI). -f forces btrfs over any lingering signature
+# `--instant` (parity with the Calamares GUI). -f forces btrfs over any lingering signature
 # (wipefs already ran, but -f is belt-and-braces). Both are flat -- no subvolumes; genfstab
 # below emits the correct entry for whichever type this is, and mkinitcpio/grub pick up
 # btrfs from the installed system's own config, so nothing else needs to change per-fs.
@@ -277,6 +277,26 @@ arch-chroot /mnt /bin/bash /chroot-setup.sh
 rm /mnt/chroot-setup.sh
 
 umount -R /mnt
+
+# POST-INSTALL ACTION (`azzioinstall --instant --final=...`). AZ_INSTALL_FINAL is set only by
+# the unattended path (idle/reboot/shutdown; run_auto normalises "restart" to "reboot" and
+# rejects anything else, so we only ever see these three here). Unset -- i.e. a plain
+# interactive `--cli` install -- keeps the historical behaviour: fall through to the completion
+# message and return to the shell. Done AFTER `umount -R /mnt` so the new root is cleanly
+# unmounted before the machine reboots or powers off.
+case "${AZ_INSTALL_FINAL:-idle}" in
+    reboot)
+        echo -e "${LIGHT_BLUE}azzio disk installation complete, rebooting now.${RESET}"
+        systemctl reboot || reboot
+        ;;
+    shutdown)
+        echo -e "${LIGHT_BLUE}azzio disk installation complete, shutting down now.${RESET}"
+        systemctl poweroff || poweroff
+        ;;
+    *)
+        : # idle -- fall through to the "you can reboot now" message below.
+        ;;
+esac
 """
     # Splice in the identity collection/persist fragments (Calamares Users + Location parity)
     # and the rsync exclude flags. Prefix /mnt: the installer targets the mounted new root.

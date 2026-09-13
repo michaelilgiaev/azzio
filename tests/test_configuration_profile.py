@@ -2,7 +2,7 @@
 
 The file_permissions map is load-bearing: archiso NORMALIZES overlay file modes
 when it packs the squashfs, so any path that must stay executable in the live ISO
-MUST have an explicit entry here. The azzio-install launcher losing its 0755
+MUST have an explicit entry here. The azzioinstall launcher losing its 0755
 entry is called out in the source as "THIS is what breaks the live installer" --
 so it gets a dedicated regression test.
 """
@@ -43,8 +43,8 @@ def test_calamares_launcher_stays_executable():
     # Regression guard for the exact bug in the source comment: if this entry is
     # dropped or its mode drifts from 755, the autostart's `[ -x ... ]` guard is
     # false and Calamares never launches on the live ISO.
-    assert profile.FILE_PERMISSIONS["/usr/local/bin/azzio-install"] == "0:0:755"
-    assert '["/usr/local/bin/azzio-install"]="0:0:755"' in profile.profiledef_sh()
+    assert profile.FILE_PERMISSIONS["/usr/local/bin/azzioinstall"] == "0:0:755"
+    assert '["/usr/local/bin/azzioinstall"]="0:0:755"' in profile.profiledef_sh()
 
 
 def test_ckbcomp_stays_executable():
@@ -131,16 +131,16 @@ def test_desktop_installer_launcher_stays_executable():
     # exactly why the badge appeared. Pin both the live-user copy (uid 1000:998) and
     # the /etc/skel copy (root-owned) to 0755 so the shipped launcher is trusted.
     assert (
-        profile.FILE_PERMISSIONS["/home/main/Desktop/azzio-install.desktop"]
+        profile.FILE_PERMISSIONS["/home/main/Desktop/azzioinstall.desktop"]
         == "1000:998:755"
     )
     assert (
-        profile.FILE_PERMISSIONS["/etc/skel/Desktop/azzio-install.desktop"]
+        profile.FILE_PERMISSIONS["/etc/skel/Desktop/azzioinstall.desktop"]
         == "0:0:755"
     )
     sh = profile.profiledef_sh()
-    assert '["/home/main/Desktop/azzio-install.desktop"]="1000:998:755"' in sh
-    assert '["/etc/skel/Desktop/azzio-install.desktop"]="0:0:755"' in sh
+    assert '["/home/main/Desktop/azzioinstall.desktop"]="1000:998:755"' in sh
+    assert '["/etc/skel/Desktop/azzioinstall.desktop"]="0:0:755"' in sh
 
 
 def test_openbox_autostart_stays_executable():

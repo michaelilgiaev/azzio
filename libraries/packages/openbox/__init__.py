@@ -31,7 +31,7 @@ Design constraints (match archiso/OpenBox/Calamares reality):
     (the root menu is removed). See libraries/packages/packages.x86_64.
   * Calamares MUST run privileged. The live medium has passwordless-sudo `main`
     and passwordless root, so the launch stays `sudo -E calamares` via the tiny
-    /usr/local/bin/azzio-install wrapper the autostart runs.
+    /usr/local/bin/azzioinstall wrapper the autostart runs.
   * NO cyan/black flash: ~/.xinitrc sets the X root to the SAME wallpaper image the
     session will show (feh --bg-fill) BEFORE OpenBox starts, and the autostart's own
     `feh --bg-fill` repaints the identical pixels -- so the first and only paint is
@@ -110,15 +110,15 @@ def wallpaper_metadata_json(wp_id: str) -> str:
 
 # The one privileged launch path shared by the autostart + the OpenBox root menu +
 # a menu launcher.
-INSTALL_WRAPPER_PATH = "/usr/local/bin/azzio-install"
+INSTALL_WRAPPER_PATH = "/usr/local/bin/azzioinstall"
 
 # The scripted (terminal) installer the CLI/SSH path runs, baked into the live ISO under
 # the azzio payload dir (/root/azzio) alongside chroot-setup.sh + packages.x86_64 + the
-# offline repo it pacstraps from. `azzio-install --cli` execs it via sudo. It is the SAME
+# offline repo it pacstraps from. `azzioinstall --cli` execs it via sudo. It is the SAME
 # partition/pacstrap/chroot-setup pipeline as the first-boot installer, authored in
 # libraries/installer.installer_sh, so a headless SSH install produces the same system a
 # GUI Calamares install would.
-INSTALL_CLI_SCRIPT_PATH = "/root/azzio/azzio-install-cli.sh"
+INSTALL_CLI_SCRIPT_PATH = "/root/azzio/azzioinstall-cli.sh"
 
 # The Calamares installer window's WM_CLASS. VERIFIED with `xprop WM_CLASS` on the running
 # installer in the live VM: BOTH fields are the lowercase "calamares" --
@@ -170,7 +170,7 @@ DEFAULT_RESOLUTION = "1920x1080"
 # by the Calamares cleanup step (calamares_shellprocess) so the installer does not appear in
 # the menu post-installation (calamares itself is also try_removed). Named here so the PLAN
 # entry that ships it and the shellprocess step that deletes it cannot drift.
-INSTALL_MENU_DESKTOP_PATH = "/usr/share/applications/azzio-install.desktop"
+INSTALL_MENU_DESKTOP_PATH = "/usr/share/applications/azzioinstall.desktop"
 
 # Installer launcher icon. The Azzio icon is standardized as a SCALABLE VECTOR,
 # assets/icons/azzio.svg (the "Az'" wordmark on the dark app tile), living under
@@ -1430,7 +1430,7 @@ command -v setxkbmap >/dev/null 2>&1 && \\
     setxkbmap -layout '{layouts}' -option '{KEYBOARD_TOGGLE}' &
 
 # 7. LIVE-ONLY -- Calamares installer, once, a couple seconds in (Manjaro-style
-#    first-run). Launched via `--gui` -- azzio-install has no default action now, so the
+#    first-run). Launched via `--gui` -- azzioinstall has no default action now, so the
 #    GUI mode must be named explicitly. The wrapper elevates via passwordless sudo on the
 #    live medium. Stripped from the installed autostart so an installed system never
 #    re-opens the installer.
@@ -1522,14 +1522,14 @@ def az_menu_usage_seed_json() -> str:
     return _app_menu.usage_seed_json()
 
 
-# --- 7. /usr/share/applications/azzio-install.desktop ----------------------
+# --- 7. /usr/share/applications/azzioinstall.desktop ----------------------
 def install_menu_desktop() -> str:
     """A launcher in the application menu so the installer can be re-opened after it is
     closed, sharing the same privileged wrapper. Lands in /usr/share/applications
     (system-wide), so it is not a per-user file and is picked up by the Azzio menu's
     application scan.
 
-    Exec names `--gui` explicitly: azzio-install has no default action, so a bare invocation
+    Exec names `--gui` explicitly: azzioinstall has no default action, so a bare invocation
     would only print help. This entry re-opens the Calamares GUI installer."""
     return """\
 [Desktop Entry]
@@ -1545,7 +1545,7 @@ Keywords=install;calamares;setup;
 """
 
 
-# --- 7b. ~/Desktop/azzio-install.desktop (live-session Desktop launcher) ----
+# --- 7b. ~/Desktop/azzioinstall.desktop (live-session Desktop launcher) ----
 def desktop_installer_launcher() -> str:
     """A double-clickable "Azzio Linux Installer" launcher that sits ON the live
     Desktop, so the installer is one obvious icon away even after the autostart window
@@ -1554,9 +1554,9 @@ def desktop_installer_launcher() -> str:
     Ships EXECUTABLE (PLAN mode 0o755 + a profile.py FILE_PERMISSIONS pin) so any file
     manager that honours the exec bit runs it without a "not trusted" prompt -- archiso
     normalizes overlay modes to 0644 in the squashfs unless a path is pinned (the same
-    gotcha documented for /usr/local/bin/azzio-install), so the pin is required.
+    gotcha documented for /usr/local/bin/azzioinstall), so the pin is required.
 
-    Exec names `--gui` explicitly: azzio-install has no default action, so a bare
+    Exec names `--gui` explicitly: azzioinstall has no default action, so a bare
     invocation would only print help. Double-clicking this opens the Calamares GUI."""
     return """\
 [Desktop Entry]
@@ -1635,7 +1635,7 @@ def azzio_command_line_interface() -> str:
 # azzio_osd() text emitter (which shipped the tkinter osd_indicator.py verbatim) is gone.
 
 
-# --- 9. /usr/local/bin/azzio-install (privileged Calamares launcher) -------
+# --- 9. /usr/local/bin/azzioinstall (privileged Calamares launcher) -------
 def install_wrapper_sh() -> str:
     """The single privileged launch path for Calamares, used by both the OpenBox
     autostart and the application-menu / Desktop installer launchers. On the live medium `main` has
@@ -1669,35 +1669,36 @@ def install_wrapper_sh() -> str:
     the session env is unchanged so the rest of the desktop keeps its Qt factor."""
     return f"""\
 #!/bin/sh
-# azzio-install -- the Azzio installer launcher for the live session.
+# azzioinstall -- the Azzio installer launcher for the live session.
 #
 # Front-ends over the SAME install (a mode must be chosen explicitly; no default action):
 #   * GUI (`-g`/`--gui`): the Calamares graphical installer.
 #   * CLI (`-c`/`--cli`): the scripted terminal installer at {INSTALL_CLI_SCRIPT_PATH}.
 #     This is what lets a user install Azzio entirely over an SSH session, with no X.
-#   * AUTO (`-a`/`--auto`): the CLI installer with every answer pre-seeded to a default
-#     (btrfs, user main, host azzio, tz Asia/Jerusalem, "admin" passwords, DHCP). Each
-#     default can be overridden with an --auto sub-flag (see the sub-flags below).
-#   Bare `azzio-install` (or -h/--help) prints help and does nothing else.
+#   * INSTANT (`-a`/`--instant`): the CLI installer with every answer pre-seeded to a
+#     default (btrfs, user main, host azzio, tz Asia/Jerusalem, "admin" passwords, DHCP).
+#     Each default can be overridden with an --instant sub-flag (see the sub-flags below).
+#   Bare `azzioinstall` (or -h/--help) prints help and does nothing else.
 #
 # `main` has passwordless sudo on the live medium, so neither path needs a polkit agent.
 #
 # Usage:
-#   azzio-install                 Show this help (no default action).
-#   azzio-install -g|--gui        Force the Calamares graphical installer.
-#   azzio-install -c|--cli        Force the scripted terminal installer (interactive).
-#   azzio-install -a|--auto       Fully-unattended install with defaults (btrfs, admin pw).
-#   azzio-install --cli --disk sdX CLI install onto /dev/sdX, no disk prompt.
-#   azzio-install --auto --hostname=box --username=me --username-password=secret
-#                                 Unattended install with overrides (all --auto sub-flags).
-#   azzio-install -h|--help       Show this help.
+#   azzioinstall                  Show this help (no default action).
+#   azzioinstall -g|--gui         Force the Calamares graphical installer.
+#   azzioinstall -c|--cli         Force the scripted terminal installer (interactive).
+#   azzioinstall -a|--instant     Fully-unattended install with defaults (btrfs, admin pw).
+#   azzioinstall --cli --disk sdX CLI install onto /dev/sdX, no disk prompt.
+#   azzioinstall --instant --hostname=box --username=me --username-password=secret
+#                                 Unattended install with overrides (all --instant sub-flags).
+#   azzioinstall --instant --final=reboot   Unattended install, then reboot into the system.
+#   azzioinstall -h|--help        Show this help.
 
 usage() {{
     cat <<'EOF'
-Usage: azzio-install [ -g | -c | -a [auto-options] | --cli --disk <dev> ] [ -h ]
+Usage: azzioinstall [ -g | -c | -a [instant-options] | --cli --disk <dev> ] [ -h ]
 
   (no option), -h, --help
-                      Show this help. Running azzio-install with no option does NOT
+                      Show this help. Running azzioinstall with no option does NOT
                       start an install; pick one of the modes below.
 
   -g, --gui, --graphical-user-interface
@@ -1710,7 +1711,7 @@ Usage: azzio-install [ -g | -c | -a [auto-options] | --cli --disk <dev> ] [ -h ]
                       timezone -- then installs. Works over SSH (no X). (The full name is
                       cosmetic and is NOT prompted; set AZ_INSTALL_FULLNAME to fill it.)
 
-  -a, --auto, --automatic
+  -a, --instant, --automatic
                       Fully-unattended install with defaults, no prompts:
                         timezone   Asia/Jerusalem
                         language   English
@@ -1720,9 +1721,10 @@ Usage: azzio-install [ -g | -c | -a [auto-options] | --cli --disk <dev> ] [ -h ]
                         hostname   azzio
                         passwords  "admin" for user and root (shared)
                         network    automatic DHCP
+                        final      idle (stay at a shell when done)
                       Erases the target disk without asking.
 
-  Auto-options (ONLY valid together with --auto; each overrides the matching default
+  Instant-options (ONLY valid together with --instant; each overrides the matching default
   above, and anything omitted keeps its default):
         --disk=<dev>|auto          "auto" = largest fixed disk (default), or a device
                                    name like sda / nvme0n1 to target that disk.
@@ -1734,27 +1736,33 @@ Usage: azzio-install [ -g | -c | -a [auto-options] | --cli --disk <dev> ] [ -h ]
                                    False: root uses --root-password instead.
         --root-password=<pw>       Root password when not shared (default admin).
         --timezone=<zone>          e.g. Europe/London            (default Asia/Jerusalem).
+        --final=idle|reboot|shutdown
+                                   What to do after the install finishes:
+                                   idle (default) = print "you can reboot now" and return
+                                   to a shell; reboot (alias restart) = reboot into the
+                                   freshly installed system; shutdown = power the machine
+                                   off.
       Example:
-        azzio-install --auto --disk=sda --hostname=box --username=me \
+        azzioinstall --instant --disk=sda --hostname=box --username=me \
           --username-password=secret --share-username-root-password=False \
-          --root-password=rootsecret --timezone=Europe/London
+          --root-password=rootsecret --timezone=Europe/London --final=reboot
 
   --cli --disk <dev>  Use /dev/<dev> (e.g. sda, nvme0n1) as the target instead of asking
-                      which disk. Only meaningful with --cli (--auto uses --disk=<dev>).
+                      which disk. Only meaningful with --cli (--instant uses --disk=<dev>).
 
 The CLI and GUI installers produce the same system (same packages, same chroot setup, a
 real user account, a root password, a hostname, and a timezone). All install modes ERASE
 the target disk.
 
 Fully unattended over SSH with your OWN values can also be driven by pre-seeding the
-environment directly (the --auto sub-flags are the friendly front-end for these), e.g.
+environment directly (the --instant sub-flags are the friendly front-end for these), e.g.
   AZ_INSTALL_DISK=sda AZ_INSTALL_HOSTNAME=box AZ_INSTALL_USERNAME=me \
   AZ_INSTALL_PASSWORD=... AZ_INSTALL_ROOT_PASSWORD=... AZ_INSTALL_TIMEZONE=Europe/London \
-  azzio-install --cli
+  azzioinstall --cli
 Recognised: AZ_INSTALL_DISK, AZ_INSTALL_HOSTNAME, AZ_INSTALL_USERNAME, AZ_INSTALL_FULLNAME,
 AZ_INSTALL_PASSWORD, AZ_INSTALL_ROOT_PASSWORD, AZ_INSTALL_TIMEZONE, AZ_INSTALL_FILESYSTEM
-(ext4 default, or btrfs), and AZ_INSTALL_CHOICE. Any prompt left un-seeded is asked
-interactively.
+(ext4 default, or btrfs), AZ_INSTALL_CHOICE, and AZ_INSTALL_FINAL (idle/reboot/shutdown).
+Any prompt left un-seeded is asked interactively.
 EOF
 }}
 
@@ -1796,7 +1804,7 @@ run_cli() {{
     # `--username-password='correct horse'` died with `env: 'horse': No such file or directory`
     # (exit 127) and the installer never ran. The quotes fix that for every field.
     if ! sudo test -r '{INSTALL_CLI_SCRIPT_PATH}'; then
-        echo "azzio-install: CLI installer not found at {INSTALL_CLI_SCRIPT_PATH}" >&2
+        echo "azzioinstall: CLI installer not found at {INSTALL_CLI_SCRIPT_PATH}" >&2
         exit 1
     fi
     exec sudo -E env \\
@@ -1810,16 +1818,17 @@ run_cli() {{
         ${{AZ_INSTALL_TIMEZONE:+"AZ_INSTALL_TIMEZONE=$AZ_INSTALL_TIMEZONE"}} \\
         ${{AZ_INSTALL_FILESYSTEM:+"AZ_INSTALL_FILESYSTEM=$AZ_INSTALL_FILESYSTEM"}} \\
         ${{AZ_INSTALL_STAR_PASSWORD:+"AZ_INSTALL_STAR_PASSWORD=$AZ_INSTALL_STAR_PASSWORD"}} \\
+        ${{AZ_INSTALL_FINAL:+"AZ_INSTALL_FINAL=$AZ_INSTALL_FINAL"}} \\
         bash '{INSTALL_CLI_SCRIPT_PATH}'
 }}
 
 run_auto() {{
-    # Fully-unattended install (`-a`/`--auto`/`--automatic`). It is `run_cli` with EVERY answer
+    # Fully-unattended install (`-a`/`--instant`/`--automatic`). It is `run_cli` with EVERY answer
     # pre-seeded to a fixed default, so there is ONE install code path -- the scripted
-    # installer -- and --auto is simply "the CLI installer, no questions asked". Not gated on a
+    # installer -- and --instant is simply "the CLI installer, no questions asked". Not gated on a
     # display: it runs on the console and over SSH alike.
     #
-    # Each default can be OVERRIDDEN by an --auto sub-flag (parsed below into az_opt_*; an unset
+    # Each default can be OVERRIDDEN by an --instant sub-flag (parsed below into az_opt_*; an unset
     # az_opt_* means "use the default here"). The `${{az_opt_X:-DEFAULT}}` idiom below is what
     # makes "whatever is omitted assumes default" true: a flag the user did not pass leaves its
     # az_opt_ empty, so the default wins.
@@ -1828,17 +1837,21 @@ run_auto() {{
     #             removable/USB); any other value (e.g. "sda", "nvme0n1") = that device
     #             (AZ_INSTALL_CHOICE=2 + AZ_INSTALL_DISK). Whole disk, no swap, unencrypted.
     #   filesystem btrfs (AZ_INSTALL_FILESYSTEM=btrfs -- parity with the Calamares GUI's
-    #             defaultFileSystemType). Not a sub-flag; --auto is always btrfs.
+    #             defaultFileSystemType). Not a sub-flag; --instant is always btrfs.
     #   hostname  --hostname (default "azzio")      user  --username (default "main")
     #   full name always blank (cosmetic GECOS; the scripted installer never prompts for it)
     #   timezone  --timezone (default "Asia/Jerusalem")   language English (fixed locale)
     #   passwords --username-password (default "admin") sets the user password. Root reuses it
     #             when --share-username-root-password is "True" (the default); with "False" the
     #             root password is --root-password (default "admin") instead. So a bare
-    #             `azzio-install --auto` gives user "admin" and root "admin" (shared) -- the
+    #             `azzioinstall --instant` gives user "admin" and root "admin" (shared) -- the
     #             values the spec's flag table lists as defaults.
     #   network   automatic DHCP -- the installed system enables NetworkManager with no static
     #             profile, which IS DHCP, so there is nothing to configure here.
+    #   final     --final: what to do once the install finishes -- "idle" (default) returns to a
+    #             shell after printing "you can reboot now"; "reboot" (alias "restart") reboots
+    #             into the freshly installed system; "shutdown" powers off. Passed through as
+    #             AZ_INSTALL_FINAL for the scripted installer's end-of-run step to honour.
     az_disk="${{az_opt_disk:-auto}}"
     if [ "$az_disk" = "auto" ]; then
         export AZ_INSTALL_CHOICE=1
@@ -1852,7 +1865,7 @@ run_auto() {{
     export AZ_INSTALL_TIMEZONE="${{az_opt_timezone:-Asia/Jerusalem}}"
     export AZ_INSTALL_FILESYSTEM=btrfs
 
-    # Passwords. --auto uses real passwords ("admin" by default), NOT the '*'/casper convention,
+    # Passwords. --instant uses real passwords ("admin" by default), NOT the '*'/casper convention,
     # so the box is reachable by password out of the box (the operator workflow logs in as the
     # user with this password). AZ_INSTALL_STAR_PASSWORD is deliberately NOT set: the scripted
     # installer's identity step gates its whole password section on that marker, so leaving it
@@ -1864,15 +1877,30 @@ run_auto() {{
         [tT][rR][uU][eE]) export AZ_INSTALL_ROOT_PASSWORD="$AZ_INSTALL_PASSWORD" ;;  # root == user
         *)                export AZ_INSTALL_ROOT_PASSWORD="${{az_opt_root_password:-admin}}" ;;
     esac
+
+    # Post-install action. Default "idle" keeps today's behaviour (the installer prints
+    # "you can reboot now" and returns to a shell). "restart" is normalised to "reboot" so
+    # both spellings mean the same thing; "shutdown" powers off. Anything else is rejected
+    # early rather than silently ignored (a typo like --final=rebot must not silently idle).
+    az_final="${{az_opt_final:-idle}}"
+    case "$az_final" in
+        [rR][eE][sS][tT][aA][rR][tT]) az_final=reboot ;;
+    esac
+    case "$az_final" in
+        idle|reboot|shutdown) ;;
+        *) echo "azzioinstall: --final must be idle, reboot, restart, or shutdown (got '$az_final')" >&2
+           usage >&2; exit 2 ;;
+    esac
+    export AZ_INSTALL_FINAL="$az_final"
     run_cli
 }}
 
 # Parse the command line. A MODE must be chosen explicitly (-g/-c/-a); `mode` stays empty until
-# one is set, and a bare invocation (or -h/--help) prints help and exits. The --auto sub-flags
+# one is set, and a bare invocation (or -h/--help) prints help and exits. The --instant sub-flags
 # (--disk/--hostname/--username/--username-password/--share-username-root-password/
-# --root-password/--timezone) are collected into az_opt_* here and consumed by run_auto; they
-# ONLY apply to --auto (see the post-loop gate). `az_seen_auto_flag` records that at least one
-# sub-flag was passed so we can reject them when --auto was not.
+# --root-password/--timezone/--final) are collected into az_opt_* here and consumed by run_auto;
+# they ONLY apply to --instant (see the post-loop gate). `az_seen_auto_flag` records that at least
+# one sub-flag was passed so we can reject them when --instant was not.
 mode=
 az_seen_auto_flag=
 # require_value "$@" : guard for a space-separated flag ("--flag val") -- error out with help
@@ -1880,16 +1908,16 @@ az_seen_auto_flag=
 # `shift; var="$1"` to consume the value itself.
 require_value() {{
     if [ "$#" -lt 2 ]; then
-        echo "azzio-install: option '$1' requires a value" >&2; usage >&2; exit 2
+        echo "azzioinstall: option '$1' requires a value" >&2; usage >&2; exit 2
     fi
 }}
 while [ $# -gt 0 ]; do
     case "$1" in
         -g|--gui|--graphical-user-interface) mode=gui ;;
         -c|--cli|--command-line-interface) mode=cli ;;
-        -a|--auto|--automatic) mode=auto ;;
+        -a|--instant|--automatic) mode=auto ;;
         # --disk is dual-purpose: `--cli --disk <dev>` pre-seeds the interactive CLI installer's
-        # disk step directly (AZ_INSTALL_CHOICE=2 + AZ_INSTALL_DISK), while `--auto --disk=<dev>`
+        # disk step directly (AZ_INSTALL_CHOICE=2 + AZ_INSTALL_DISK), while `--instant --disk=<dev>`
         # (or "auto") is recorded as an override run_auto resolves. Recording it in az_opt_disk
         # AND (for the --cli combo) exporting the CHOICE/DISK pair keeps both working.
         --disk) require_value "$@"; shift; az_opt_disk="$1"; az_seen_auto_flag=1
@@ -1914,18 +1942,20 @@ while [ $# -gt 0 ]; do
         --root-password=*) az_opt_root_password="${{1#--root-password=}}"; az_seen_auto_flag=1 ;;
         --timezone) require_value "$@"; shift; az_opt_timezone="$1"; az_seen_auto_flag=1 ;;
         --timezone=*) az_opt_timezone="${{1#--timezone=}}"; az_seen_auto_flag=1 ;;
+        --final) require_value "$@"; shift; az_opt_final="$1"; az_seen_auto_flag=1 ;;
+        --final=*) az_opt_final="${{1#--final=}}"; az_seen_auto_flag=1 ;;
         -h|--help) usage; exit 0 ;;
-        *) echo "azzio-install: unknown option: $1" >&2; usage >&2; exit 2 ;;
+        *) echo "azzioinstall: unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
 
-# GATE: the identity/disk sub-flags only make sense with --auto (they seed run_auto's answers).
+# GATE: the identity/disk sub-flags only make sense with --instant (they seed run_auto's answers).
 # The lone exception is `--cli --disk <dev>`, the long-standing combo that pre-seeds the
 # interactive installer's disk prompt -- so --disk with --cli is allowed, but the OTHER sub-flags
-# (hostname/username/passwords/timezone) require --auto. Reject a sub-flag given without --auto
-# rather than silently ignoring it (a silent no-op would install with defaults the user thought
-# they had overridden).
+# (hostname/username/passwords/timezone/final) require --instant. Reject a sub-flag given without
+# --instant rather than silently ignoring it (a silent no-op would install with defaults the user
+# thought they had overridden).
 if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then
     az_bad=
     [ -n "$az_opt_hostname" ] && az_bad="$az_bad --hostname"
@@ -1934,10 +1964,11 @@ if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then
     [ -n "$az_opt_share_root_password" ] && az_bad="$az_bad --share-username-root-password"
     [ -n "$az_opt_root_password" ] && az_bad="$az_bad --root-password"
     [ -n "$az_opt_timezone" ] && az_bad="$az_bad --timezone"
+    [ -n "$az_opt_final" ] && az_bad="$az_bad --final"
     # --disk is allowed alongside --cli; only flag it here if --disk was given without --cli either.
     [ -n "$az_opt_disk" ] && [ "$mode" != "cli" ] && az_bad="$az_bad --disk"
     if [ -n "$az_bad" ]; then
-        echo "azzio-install: these options require --auto:$az_bad" >&2
+        echo "azzioinstall: these options require --instant:$az_bad" >&2
         usage >&2
         exit 2
     fi
@@ -1947,7 +1978,7 @@ case "$mode" in
     gui) run_gui ;;
     cli) run_cli ;;
     auto) run_auto ;;
-    *) usage; exit 0 ;;    # no mode chosen (bare `azzio-install`) -> help, no install.
+    *) usage; exit 0 ;;    # no mode chosen (bare `azzioinstall`) -> help, no install.
 esac
 """
 
@@ -2119,7 +2150,7 @@ PLAN = [
         # The Desktop launcher must be EXECUTABLE (0o755) so a file manager launches it
         # on double-click without an untrusted-.desktop prompt.
         "builder": desktop_installer_launcher,
-        "dest": f"{HOME}/Desktop/azzio-install.desktop",
+        "dest": f"{HOME}/Desktop/azzioinstall.desktop",
         "mode": _EXEC,
         "owner": "home",
     },

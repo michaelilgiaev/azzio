@@ -56,12 +56,12 @@ def test_run_installs_ckbcomp_into_usr_bin():
 
 
 def test_run_emits_the_cli_installer_script():
-    # The scripted (terminal/SSH) installer -- the CLI half of azzio-install -- must be
-    # baked into the ISO under /root/azzio so `azzio-install --cli` can install over SSH.
-    # Assert run() writes installer.installer_sh() to azzio-install-cli.sh (executable).
+    # The scripted (terminal/SSH) installer -- the CLI half of azzioinstall -- must be
+    # baked into the ISO under /root/azzio so `azzioinstall --cli` can install over SSH.
+    # Assert run() writes installer.installer_sh() to azzioinstall-cli.sh (executable).
     src = inspect.getsource(compiler.run)
     assert 'installer.installer_sh()' in src
-    assert 'azzio-install-cli.sh' in src
+    assert 'azzioinstall-cli.sh' in src
 
 
 def test_emit_calamares_ships_the_window_icon_into_branding():

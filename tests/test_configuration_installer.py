@@ -205,7 +205,7 @@ def test_chroot_setup_strips_live_only_installer_autostart():
     # The staged "installed" autostart is copied over the inherited live one.
     assert csp.INSTALLED_AUTOSTART_SRC in s
     # The installer wrapper + menu entry are removed so the installed system never re-opens it.
-    assert csp.INSTALLER_WRAPPER in s          # /usr/local/bin/azzio-install removed
+    assert csp.INSTALLER_WRAPPER in s          # /usr/local/bin/azzioinstall removed
     assert csp.INSTALLER_MENU_DESKTOP in s     # menu launcher removed
 
 
@@ -437,7 +437,7 @@ def test_installer_sh_mount_point_block_actually_creates_dirs(tmp_path):
 
 
 def test_installer_sh_preseed_choice_and_disk_for_ssh():
-    # The scripted installer is the CLI/SSH install path (azzio-install --cli). For an
+    # The scripted installer is the CLI/SSH install path (azzioinstall --cli). For an
     # UNATTENDED SSH install it must accept a pre-seeded disk selection via env instead of
     # the interactive `read`: AZ_INSTALL_CHOICE (1=auto, 2=manual) and AZ_INSTALL_DISK. When
     # they are unset the interactive prompts still run (a plain `--cli` over SSH works step
@@ -473,7 +473,7 @@ def test_installer_sh_nvme_vs_sata_partition_suffix():
 
 def test_installer_sh_filesystem_knob_defaults_ext4_and_supports_btrfs():
     # The root filesystem is chosen by AZ_INSTALL_FILESYSTEM: ext4 by default (a plain
-    # `azzio-install --cli` is unchanged) or btrfs when set (what `--auto` pre-seeds, for
+    # `azzioinstall --cli` is unchanged) or btrfs when set (what `--instant` pre-seeds, for
     # parity with the Calamares GUI's defaultFileSystemType). The value is validated up front
     # (only ext4/btrfs) so a typo aborts BEFORE the wipe, and BOTH mkfs branches must ship.
     s = installer.installer_sh()

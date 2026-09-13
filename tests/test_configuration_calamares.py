@@ -420,12 +420,12 @@ def test_shellprocess_removes_installer_from_installed_desktop():
     assert f"rm -f {csp.INSTALLER_DESKTOP_LAUNCHER}" in cmd
     assert f"rm -f {csp.INSTALLER_SKEL_LAUNCHER}" in cmd
     # It targets the live user's home Desktop launcher specifically.
-    assert csp.INSTALLER_DESKTOP_LAUNCHER == "/home/main/Desktop/azzio-install.desktop"
+    assert csp.INSTALLER_DESKTOP_LAUNCHER == "/home/main/Desktop/azzioinstall.desktop"
 
 
 def test_shellprocess_removes_installer_menu_entry_post_install():
     # The installer must NOT appear ANYWHERE post-installation, so the system-wide
-    # application-menu launcher (/usr/share/applications/azzio-install.desktop) is removed
+    # application-menu launcher (/usr/share/applications/azzioinstall.desktop) is removed
     # too (previously it was left in place). calamares itself is also try_removed by the
     # packages module, so keeping the entry would just leave a dead launcher in the menu.
     from packages.calamares import calamares_shellprocess as csp
@@ -435,16 +435,16 @@ def test_shellprocess_removes_installer_menu_entry_post_install():
     assert f"rm -f {csp.INSTALLER_MENU_DESKTOP}" in cmd
     # Single source of truth: the path this removes is exactly the one openbox.py ships.
     assert csp.INSTALLER_MENU_DESKTOP == desktop.INSTALL_MENU_DESKTOP_PATH
-    assert csp.INSTALLER_MENU_DESKTOP == "/usr/share/applications/azzio-install.desktop"
+    assert csp.INSTALLER_MENU_DESKTOP == "/usr/share/applications/azzioinstall.desktop"
 
 
 def test_shellprocess_removes_installer_wrapper_post_install():
-    # The privileged Calamares launcher wrapper (/usr/local/bin/azzio-install) makes sense on
+    # The privileged Calamares launcher wrapper (/usr/local/bin/azzioinstall) makes sense on
     # the LIVE medium (the autostart + both installer launchers exec it), but must NOT survive
     # onto the INSTALLED system: once Calamares has installed Azzio there is nothing left to
-    # install, so a leftover azzio-install wrapper is dead weight. The OFFLINE unpackfs install
+    # install, so a leftover azzioinstall wrapper is dead weight. The OFFLINE unpackfs install
     # copies the whole live rootfs, so this root-owned file lands on the target and the cleanup
-    # step must delete it (post-install requirement: no azzio-install wrapper on the installed
+    # step must delete it (post-install requirement: no azzioinstall wrapper on the installed
     # system). The LIVE ISO is unchanged -- the wrapper is still shipped there.
     from packages.calamares import calamares_shellprocess as csp
     from packages import openbox as desktop
@@ -453,7 +453,7 @@ def test_shellprocess_removes_installer_wrapper_post_install():
     assert f"rm -f {csp.INSTALLER_WRAPPER}" in cmd
     # Single source of truth: the path this removes is exactly the one openbox.py ships.
     assert csp.INSTALLER_WRAPPER == desktop.INSTALL_WRAPPER_PATH
-    assert csp.INSTALLER_WRAPPER == "/usr/local/bin/azzio-install"
+    assert csp.INSTALLER_WRAPPER == "/usr/local/bin/azzioinstall"
     # The LIVE medium still ships the wrapper (an emit_plan entry writes it to that path):
     # the cleanup only strips it from the TARGET chroot, not from the live ISO.
     plan_dests = {e["dest"] for e in desktop.emit_plan()}

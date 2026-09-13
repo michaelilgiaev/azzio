@@ -7,7 +7,7 @@
  *
  * The key contract (the installer fix): calamares.desktop is HIDDEN (its stock
  * "Install System" entry runs a dead `pkexec calamares` with no polkit agent),
- * and azzio-install.desktop ("Azzio Linux Installer", passwordless-sudo Exec)
+ * and azzioinstall.desktop ("Azzio Linux Installer", passwordless-sudo Exec)
  * is SHOWN so the menu launches/re-opens it. This mirrors what the C daemon ships
  * and must stay swapped relative to the old Python behaviour.
  */
@@ -28,8 +28,8 @@ static void test_installer_swap(void) {
     g_print("installer swap:\n");
     CHECK(az_is_hidden_desktop_id("calamares.desktop") == TRUE,
           "calamares.desktop is HIDDEN");
-    CHECK(az_is_hidden_desktop_id("azzio-install.desktop") == FALSE,
-          "azzio-install.desktop is SHOWN");
+    CHECK(az_is_hidden_desktop_id("azzioinstall.desktop") == FALSE,
+          "azzioinstall.desktop is SHOWN");
 }
 
 /* --- other denylist ids stay hidden -------------------------------------- */
@@ -153,8 +153,8 @@ static void test_live_session(void) {
     CHECK(az_is_live_session() == FALSE, "AZZIO_FORCE_LIVE=false -> installed");
     g_unsetenv("AZZIO_FORCE_LIVE");
     /* installer id is the expected basename */
-    CHECK(g_strcmp0(az_installer_desktop_id(), "azzio-install.desktop") == 0,
-          "installer desktop id is azzio-install.desktop");
+    CHECK(g_strcmp0(az_installer_desktop_id(), "azzioinstall.desktop") == 0,
+          "installer desktop id is azzioinstall.desktop");
 }
 
 int main(void) {

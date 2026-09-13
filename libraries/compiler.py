@@ -409,17 +409,17 @@ def run(bar: ProgressBar, offline: bool, reclaim_after_mkarchiso,
     # PROFILE ROOT) is NOT emitted here: its iso_name is the one thing that differs
     # per variant, so it is written per-variant in the finalize loop below. Calamares
     # (auto-launched from the OpenBox session, step 8) is the GUI installer. The scripted
-    # terminal installer is ALSO emitted (as azzio-install-cli.sh under /root/azzio) so
-    # `azzio-install --cli` can install over SSH with no X -- same partition/pacstrap/
+    # terminal installer is ALSO emitted (as azzioinstall-cli.sh under /root/azzio) so
+    # `azzioinstall --cli` can install over SSH with no X -- same partition/pacstrap/
     # chroot-setup pipeline as the first-boot installer, just driven from a terminal.
     bar.step("Emit installer payload")
     emit.write_exec(ea / "first-boot-setup.sh", installer.first_boot_sh())
     emit.write_text(ea / "first-boot-setup.service", installer.first_boot_service())
     emit.write_text(ea / "first-boot-setup.conf", installer.first_boot_conf())
-    # The scripted (terminal/SSH) installer -- the CLI half of azzio-install. Baked under
+    # The scripted (terminal/SSH) installer -- the CLI half of azzioinstall. Baked under
     # /root/azzio alongside the payload it reads (packages.x86_64, chroot-setup.sh, the
-    # offline repo). openbox.INSTALL_CLI_SCRIPT_PATH points azzio-install --cli at it.
-    emit.write_exec(ea / "azzio-install-cli.sh", installer.installer_sh())
+    # offline repo). openbox.INSTALL_CLI_SCRIPT_PATH points azzioinstall --cli at it.
+    emit.write_exec(ea / "azzioinstall-cli.sh", installer.installer_sh())
 
     # 11 -- Resolve build pacman.conf and mirrors.
     # Writes the pacstrap/mkarchiso build pacman.conf, injects the persistent CacheDir,

@@ -2,7 +2,7 @@
 
 The Calamares GUI collects, on its Location / Keyboard / Users pages, the things that make
 an installed system PERSONAL and SECURE: a hostname, a real user account with a chosen
-password, a root password, and a timezone. The old `azzio-install --cli` skipped all of
+password, a root password, and a timezone. The old `azzioinstall --cli` skipped all of
 that -- it copied the LIVE `main` account and the LIVE (passwordless) root verbatim and
 hard-set Asia/Jerusalem, so a headless SSH install produced a box with NO root password and
 a fixed timezone: NOT "the same result" Calamares gives.
@@ -29,12 +29,12 @@ Language and console keyboard stay ENGLISH-ONLY ("us") on purpose: that is the d
 deliberate locale policy (see packages/calamares/locale.py), the same policy the GUI enforces
 outside its optional second-layout nicety. LUKS/swap stay off (the partition editor is the
 one Calamares page not reimplemented in a TTY); the root filesystem is ext4 by default, or
-btrfs when AZ_INSTALL_FILESYSTEM=btrfs (which `azzio-install --auto` sets, matching the GUI).
+btrfs when AZ_INSTALL_FILESYSTEM=btrfs (which `azzioinstall --instant` sets, matching the GUI).
 
 Everything here is a pure string producer -- no network, no subprocess, no filesystem writes
 -- so it is unit-testable exactly like installer.py. The env pre-seed names are the
 AZ_INSTALL_* family, extending the AZ_INSTALL_CHOICE / AZ_INSTALL_DISK pair the disk step
-already honours, so a fully unattended `azzio-install --cli` stays scriptable.
+already honours, so a fully unattended `azzioinstall --cli` stays scriptable.
 """
 
 from __future__ import annotations
@@ -76,10 +76,10 @@ else
     az_hostname="${az_hostname:-azzio}"
 fi
 
-# Full name (optional, cosmetic GECOS field). NEVER PROMPTED (spec: "azzio-install --cli
+# Full name (optional, cosmetic GECOS field). NEVER PROMPTED (spec: "azzioinstall --cli
 # ... remove full name prompting"). It is a purely cosmetic field, so the scripted install
 # does not ask for it interactively at all: it is taken ONLY from AZ_INSTALL_FULLNAME when
-# that is explicitly pre-seeded, and otherwise left blank. This also makes --auto (which
+# that is explicitly pre-seeded, and otherwise left blank. This also makes --instant (which
 # does not set it) fall straight through to the empty case with no prompt to block on.
 if [ -n "$AZ_INSTALL_FULLNAME" ]; then
     az_fullname="$AZ_INSTALL_FULLNAME"
@@ -124,7 +124,8 @@ while :; do
     break
 done
 
-# STAR-PASSWORD convention (`azzio-install --auto` sets AZ_INSTALL_STAR_PASSWORD=1): both the
+# STAR-PASSWORD convention (opt-in via AZ_INSTALL_STAR_PASSWORD=1 in the environment; no wrapper
+# flag sets it today -- `--instant` uses real "admin" passwords): both the
 # user and root get a literal '*' in the shadow field -- the Ubuntu/casper standard. '*' is an
 # INVALID hash, so no password authenticates, but the account is NOT locked (unlike '!'); the
 # box stays usable via tty1 autologin + NOPASSWD sudo, exactly like the live medium. When set we
@@ -206,8 +207,8 @@ printf '%s' "$az_hostname" > {INFO_DIR}/hostname
 printf '%s' "$az_username" > {INFO_DIR}/username
 printf '%s' "$az_fullname" > {INFO_DIR}/fullname
 printf '%s' "$az_timezone" > {INFO_DIR}/timezone
-# Passwords. Under the STAR-PASSWORD convention (--auto) we persist only a marker and NO
-# plaintext: the chroot writes a literal '*' for user and root. Otherwise the collected
+# Passwords. Under the STAR-PASSWORD convention (AZ_INSTALL_STAR_PASSWORD) we persist only a
+# marker and NO plaintext: the chroot writes a literal '*' for user and root. Otherwise the collected
 # passwords go to root-only files (0600) that the chroot consumes and shreds.
 if [ -n "$az_star_password" ]; then
     printf '%s' "1" > {INFO_DIR}/star_password
@@ -268,7 +269,7 @@ if [ -d /etc/install_info ]; then
         chfn -f "$az_fullname" "$az_login" 2>/dev/null || usermod -c "$az_fullname" "$az_login" 2>/dev/null || true
     fi
 
-    # Passwords. STAR-PASSWORD convention (--auto): write a literal '*' into the shadow field
+    # Passwords. STAR-PASSWORD convention (AZ_INSTALL_STAR_PASSWORD): write a literal '*' into the shadow field
     # for BOTH the login and root -- the Ubuntu/casper standard. `usermod -p '*'` sets the hash
     # field verbatim to '*', an INVALID hash: no password authenticates, but the account is NOT
     # locked (unlike '!' / `passwd -l`), so tty1 autologin + NOPASSWD sudo keep the box usable.
