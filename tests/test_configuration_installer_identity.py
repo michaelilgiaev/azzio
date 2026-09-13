@@ -34,13 +34,15 @@ def _bash_ok(fragment: str) -> None:
 
 def test_collect_has_env_preseed_and_interactive_fallback_for_every_field():
     s = idy.identity_collect_sh()
-    # Each field: an AZ_INSTALL_* pre-seed AND a `read` fallback for interactive use.
+    # Each PROMPTED field: an AZ_INSTALL_* pre-seed AND a `read` fallback for interactive use.
     assert 'if [ -n "$AZ_INSTALL_HOSTNAME" ]' in s and 'read -rp "Hostname' in s
-    assert 'if [ -n "$AZ_INSTALL_FULLNAME" ]' in s and 'read -rp "Your full name' in s
     assert 'if [ -n "$AZ_INSTALL_USERNAME" ]' in s and 'read -rp "Username' in s
     assert 'if [ -n "$AZ_INSTALL_PASSWORD" ]' in s and 'read -rsp "Password for' in s
     assert 'if [ -n "$AZ_INSTALL_ROOT_PASSWORD" ]' in s
     assert 'if [ -n "$AZ_INSTALL_TIMEZONE" ]' in s and 'read -rp "Timezone' in s
+    # Full name is the ONE field with a pre-seed but NO interactive fallback (never prompted).
+    assert 'if [ -n "$AZ_INSTALL_FULLNAME" ]' in s
+    assert 'read -rp "Your full name' not in s
 
 
 def test_collect_reads_passwords_hidden_and_confirms():
@@ -51,25 +53,27 @@ def test_collect_reads_passwords_hidden_and_confirms():
     assert "Passwords did not match" in s
 
 
-def test_collect_skips_fullname_prompt_under_star_password():
-    # `azzio-install --auto` leaves the full name blank (spec: full_name=NULL, skip). An empty
-    # AZ_INSTALL_FULLNAME cannot survive run_cli()'s `${VAR:+...}` sudo forwarding, so the collect
-    # step must instead skip the full-name prompt under the auto/unattended marker
-    # (AZ_INSTALL_STAR_PASSWORD) -- otherwise --auto blocks on "Your full name (optional):".
+def test_collect_never_prompts_for_fullname():
+    # SPEC ("azzio-install --cli ... remove full name prompting"): the full name is a cosmetic
+    # GECOS field and is NEVER prompted. It is taken from AZ_INSTALL_FULLNAME when set and
+    # otherwise left blank -- so the collect step has NO interactive `read` for it, and the
+    # else-branch simply blanks az_fullname and reports it skipped.
     s = idy.identity_collect_sh()
-    # The full-name block gates on the star/auto marker and leaves az_fullname empty there.
-    assert 'elif [ -n "$AZ_INSTALL_STAR_PASSWORD" ]; then' in s
+    # No interactive full-name prompt at all (neither the read nor any old star-gated branch).
+    assert 'read -rp "Your full name' not in s
+    assert 'elif [ -n "$AZ_INSTALL_STAR_PASSWORD" ]; then' not in s  # old 3-branch gate is gone
+    # Honour an explicit pre-seed; otherwise blank + "skipped".
+    assert 'if [ -n "$AZ_INSTALL_FULLNAME" ]' in s
+    assert "az_fullname=" in s
     assert "Full name: (skipped)" in s
-    # The interactive `read` fallback for a plain `--cli` run is still present.
-    assert 'read -rp "Your full name' in s
 
 
-def test_collect_fullname_skipped_noninteractively_under_star(tmp_path):
-    # Behavioural: with AZ_INSTALL_STAR_PASSWORD set and AZ_INSTALL_FULLNAME UNSET (exactly how
-    # --auto arrives after run_cli drops the empty fullname), the collect step must run to
-    # completion WITHOUT reading the full name from stdin. Driven with stdin closed it must exit
-    # 0 and leave az_fullname empty. A regression that re-prompts here would hang/fail on the
-    # empty stdin, catching the reported "--auto prompts: Your full name (optional):" bug.
+def test_collect_fullname_skipped_noninteractively_without_env(tmp_path):
+    # Behavioural: a plain `--cli` run (NO AZ_INSTALL_FULLNAME) must complete WITHOUT ever
+    # reading a full name -- proving the prompt is gone. The other prompted fields are fed on
+    # stdin (hostname, username, password x2, same-root default, timezone); the full name is
+    # NOT among them, so a regression that re-introduced the prompt would consume a line meant
+    # for a later field (or block), which this catches. az_fullname must end up empty.
     import subprocess, os
     s = idy.identity_collect_sh()
     zdir = tmp_path / "zoneinfo" / "Asia"
@@ -77,17 +81,43 @@ def test_collect_fullname_skipped_noninteractively_under_star(tmp_path):
     (zdir / "Jerusalem").write_text("")
     s = s.replace("/usr/share/zoneinfo", str(tmp_path / "zoneinfo"))
     driver = tmp_path / "collect.sh"
-    driver.write_text("#!/bin/bash\nexport LIGHT_BLUE='' RESET=''\n" + s
-                      + '\necho "FULL=[$az_fullname] USER=$az_username"\n')
-    env = dict(os.environ,
-               AZ_INSTALL_STAR_PASSWORD="1", AZ_INSTALL_USERNAME="main",
-               AZ_INSTALL_HOSTNAME="azzio", AZ_INSTALL_TIMEZONE="Asia/Jerusalem")
-    env.pop("AZ_INSTALL_FULLNAME", None)  # UNSET, as --auto's dropped empty value arrives.
-    r = subprocess.run(["bash", str(driver)], capture_output=True, text=True,
-                       env=env, stdin=subprocess.DEVNULL, timeout=30)
-    assert r.returncode == 0, f"collect blocked/failed on fullname under star mode: {r.stderr}"
-    assert "FULL=[] USER=main" in r.stdout, r.stdout
+    driver.write_text("#!/bin/bash\nexport LIGHT_BLUE='' RESET='' RED=''\n" + s
+                      + '\necho "FULL=[$az_fullname] USER=$az_username TZ=$az_timezone"\n')
+    env = dict(os.environ)
+    for k in [k for k in env if k.startswith("AZ_INSTALL_")]:
+        env.pop(k)  # a truly bare --cli run: nothing pre-seeded.
+    # hostname, username, password, repeat password, same-root(Enter=Y), timezone
+    stdin = "myhost\nalice\nsecret\nsecret\n\nAsia/Jerusalem\n"
+    r = subprocess.run(["bash", str(driver)], input=stdin, capture_output=True, text=True,
+                       env=env, timeout=30)
+    assert r.returncode == 0, f"collect blocked/failed: {r.stderr}"
+    assert "FULL=[] USER=alice TZ=Asia/Jerusalem" in r.stdout, r.stdout
     assert "Your full name" not in r.stdout
+
+
+def test_collect_fullname_honoured_when_preseeded(tmp_path):
+    # The pre-seed path still works: an explicit AZ_INSTALL_FULLNAME is used verbatim (and
+    # reported "(pre-seeded)"), with everything else pre-seeded so the run is non-interactive.
+    import subprocess, os
+    s = idy.identity_collect_sh()
+    zdir = tmp_path / "zoneinfo" / "Asia"
+    zdir.mkdir(parents=True)
+    (zdir / "Jerusalem").write_text("")
+    s = s.replace("/usr/share/zoneinfo", str(tmp_path / "zoneinfo"))
+    driver = tmp_path / "collect.sh"
+    driver.write_text("#!/bin/bash\nexport LIGHT_BLUE='' RESET='' RED=''\n" + s
+                      + '\necho "FULL=[$az_fullname]"\n')
+    env = dict(os.environ)
+    for k in [k for k in env if k.startswith("AZ_INSTALL_")]:
+        env.pop(k)
+    env.update(AZ_INSTALL_FULLNAME="Alice Liddell", AZ_INSTALL_HOSTNAME="h",
+               AZ_INSTALL_USERNAME="alice", AZ_INSTALL_PASSWORD="p",
+               AZ_INSTALL_ROOT_PASSWORD="p", AZ_INSTALL_TIMEZONE="Asia/Jerusalem")
+    r = subprocess.run(["bash", str(driver)], stdin=subprocess.DEVNULL, capture_output=True,
+                       text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "FULL=[Alice Liddell]" in r.stdout, r.stdout
+    assert "Full name: Alice Liddell (pre-seeded)" in r.stdout
 
 
 def test_collect_skips_password_prompts_under_star_password():

@@ -376,11 +376,53 @@ def bash_profile_startx() -> str:
     only when not already in X) it replaces the login shell with startx, so the
     autologin drops straight into the graphical session. On any other VT or an SSH
     login $DISPLAY is set or $(tty) != /dev/tty1, so the guard is false and you get a
-    normal shell -- important for rescue/maintenance use of the ISO."""
+    normal shell -- important for rescue/maintenance use of the ISO.
+
+    KEYBOARD PROTOCOL RESET (the reported "ssh outputs 7;3u / 7;5u junk when I hold
+    ctrl/alt" bug). Modern terminals -- kitty in particular, the one Azzio ships and the
+    one the operator sshes FROM -- speak the "progressive"/CSI-u keyboard protocol
+    (a.k.a. the kitty keyboard protocol / xterm modifyOtherKeys): a modified keypress is
+    reported as `ESC [ <codepoint> ; <modifier> u` instead of a legacy control byte.
+    When the terminal has that mode enabled and the program on the OTHER end does NOT
+    understand it, the escape's `ESC [` prefix is swallowed by the line editor and only
+    the tail leaks to the screen as literal text -- `7;3u` (Alt held: mod 1+2) and
+    `7;5u` (Ctrl held: mod 1+4). Over ssh that is exactly what happens: the guest's login
+    shell is plain bash, whose readline (checked: bash 5.3 / readline 8.3 emit and decode
+    NO `ESC[>...u`) cannot parse CSI-u, and the shipped `xterm-kitty` terminfo advertises
+    no such capability -- yet the enabled mode rides through ssh with $TERM, so every
+    Ctrl-/Alt- chord (ctrl+u, alt+space, arrow-key navigation, backspace) spews the tail.
+
+    The robust, client-agnostic fix is for the guest's interactive shell to tell the
+    terminal "I speak LEGACY keys only": push an empty keyboard-protocol flag set
+    (`ESC[>0u`, kitty "disable all enhancements") and turn xterm modifyOtherKeys off
+    (`ESC[>4;0m`). We do it for every INTERACTIVE shell (an ssh/rescue login is
+    interactive; the tty1 autologin `exec startx`s below before any prompt, so this is a
+    no-op there) and RE-ASSERT it from PROMPT_COMMAND, so a full-screen TUI that turned
+    the protocol back on and then died without restoring it cannot leave the next prompt
+    spewing `...u` garbage. This lives in the Azzio-owned .bash_profile (there is no stock
+    one) so the fix ships on the guest regardless of whether the operator connects via
+    `hypervisor ssh` or a bare `ssh -p <port>`."""
     return """\
 # ~/.bash_profile -- Azzio live session bootstrap.
 # Source .bashrc for interactive niceties if present.
 [[ -f ~/.bashrc ]] && . ~/.bashrc
+
+# LEGACY KEYBOARD for interactive shells (fixes the ssh "7;3u / 7;5u" junk on Ctrl/Alt
+# chords): ask the terminal to stop sending kitty/CSI-u + modifyOtherKeys key reports the
+# plain-bash line editor cannot decode. ESC[>0u pushes an empty kitty-keyboard flag set
+# (disable all progressive enhancements); ESC[>4;0m turns xterm modifyOtherKeys off. Only
+# meaningful on a terminal (guarded on interactive + a tty on fd 1), and re-asserted every
+# prompt so a TUI that re-enabled the protocol and exited uncleanly cannot leave the shell
+# spewing `...u`. No-op on the tty1 autologin: it exec-startx'es below before any prompt.
+if [[ $- == *i* ]]; then
+    _azzio_legacy_keys() { [[ -t 1 ]] && printf '\\e[>0u\\e[>4;0m'; }
+    _azzio_legacy_keys
+    case "$PROMPT_COMMAND" in
+        *_azzio_legacy_keys*) : ;;                       # already installed (re-sourced shell)
+        "") PROMPT_COMMAND=_azzio_legacy_keys ;;
+        *) PROMPT_COMMAND="_azzio_legacy_keys;$PROMPT_COMMAND" ;;
+    esac
+fi
 
 # Auto-start the graphical live session on tty1 login ONLY. On other VTs or over
 # SSH this is skipped, leaving a plain login shell for rescue/maintenance.
@@ -1633,8 +1675,9 @@ def install_wrapper_sh() -> str:
 #   * GUI (`-g`/`--gui`): the Calamares graphical installer.
 #   * CLI (`-c`/`--cli`): the scripted terminal installer at {INSTALL_CLI_SCRIPT_PATH}.
 #     This is what lets a user install Azzio entirely over an SSH session, with no X.
-#   * AUTO (`-a`/`--auto`): the CLI installer with every answer pre-seeded to fixed
-#     defaults (btrfs, user main, host azzio, tz Asia/Jerusalem, '*' passwords, DHCP).
+#   * AUTO (`-a`/`--auto`): the CLI installer with every answer pre-seeded to a default
+#     (btrfs, user main, host azzio, tz Asia/Jerusalem, "admin" passwords, DHCP). Each
+#     default can be overridden with an --auto sub-flag (see the sub-flags below).
 #   Bare `azzio-install` (or -h/--help) prints help and does nothing else.
 #
 # `main` has passwordless sudo on the live medium, so neither path needs a polkit agent.
@@ -1643,13 +1686,15 @@ def install_wrapper_sh() -> str:
 #   azzio-install                 Show this help (no default action).
 #   azzio-install -g|--gui        Force the Calamares graphical installer.
 #   azzio-install -c|--cli        Force the scripted terminal installer (interactive).
-#   azzio-install -a|--auto       Fully-unattended install with fixed defaults (btrfs).
+#   azzio-install -a|--auto       Fully-unattended install with defaults (btrfs, admin pw).
 #   azzio-install --cli --disk sdX CLI install onto /dev/sdX, no disk prompt.
+#   azzio-install --auto --hostname=box --username=me --username-password=secret
+#                                 Unattended install with overrides (all --auto sub-flags).
 #   azzio-install -h|--help       Show this help.
 
 usage() {{
     cat <<'EOF'
-Usage: azzio-install [ -g | -c | -a | --cli --disk <dev> ] [ -h ]
+Usage: azzio-install [ -g | -c | -a [auto-options] | --cli --disk <dev> ] [ -h ]
 
   (no option), -h, --help
                       Show this help. Running azzio-install with no option does NOT
@@ -1661,32 +1706,48 @@ Usage: azzio-install [ -g | -c | -a | --cli --disk <dev> ] [ -h ]
   -c, --cli, --command-line-interface
                       Launch the scripted terminal installer, with parameter parity to
                       Calamares: it walks the SAME choices as the Calamares pages -- disk
-                      (auto/manual), hostname, your name, username, user password, root
-                      password, and timezone -- then installs. Works over SSH (no X).
+                      (auto/manual), hostname, username, user password, root password, and
+                      timezone -- then installs. Works over SSH (no X). (The full name is
+                      cosmetic and is NOT prompted; set AZ_INSTALL_FULLNAME to fill it.)
 
   -a, --auto, --automatic
-                      Fully-unattended install with fixed defaults, no prompts:
+                      Fully-unattended install with defaults, no prompts:
                         timezone   Asia/Jerusalem
                         language   English
                         disk       the largest FIXED disk (skips removable/USB), whole
                                    disk, no swap, btrfs, unencrypted
-                        user       main   (full name skipped)
+                        user       main   (full name blank)
                         hostname   azzio
-                        passwords  '*' for user and root (Ubuntu/casper convention: no
-                                   password login, account not locked; console autologin
-                                   + passwordless sudo still work)
+                        passwords  "admin" for user and root (shared)
                         network    automatic DHCP
                       Erases the target disk without asking.
 
+  Auto-options (ONLY valid together with --auto; each overrides the matching default
+  above, and anything omitted keeps its default):
+        --disk=<dev>|auto          "auto" = largest fixed disk (default), or a device
+                                   name like sda / nvme0n1 to target that disk.
+        --hostname=<name>          Installed hostname            (default azzio).
+        --username=<name>          Login user name               (default main).
+        --username-password=<pw>   The user's password           (default admin).
+        --share-username-root-password=True|False
+                                   True (default): root reuses the user password.
+                                   False: root uses --root-password instead.
+        --root-password=<pw>       Root password when not shared (default admin).
+        --timezone=<zone>          e.g. Europe/London            (default Asia/Jerusalem).
+      Example:
+        azzio-install --auto --disk=sda --hostname=box --username=me \
+          --username-password=secret --share-username-root-password=False \
+          --root-password=rootsecret --timezone=Europe/London
+
   --cli --disk <dev>  Use /dev/<dev> (e.g. sda, nvme0n1) as the target instead of asking
-                      which disk. Only meaningful with --cli.
+                      which disk. Only meaningful with --cli (--auto uses --disk=<dev>).
 
 The CLI and GUI installers produce the same system (same packages, same chroot setup, a
 real user account, a root password, a hostname, and a timezone). All install modes ERASE
 the target disk.
 
-Fully unattended over SSH with your OWN values (instead of --auto's fixed ones): pre-seed
-any prompt via the environment, e.g.
+Fully unattended over SSH with your OWN values can also be driven by pre-seeding the
+environment directly (the --auto sub-flags are the friendly front-end for these), e.g.
   AZ_INSTALL_DISK=sda AZ_INSTALL_HOSTNAME=box AZ_INSTALL_USERNAME=me \
   AZ_INSTALL_PASSWORD=... AZ_INSTALL_ROOT_PASSWORD=... AZ_INSTALL_TIMEZONE=Europe/London \
   azzio-install --cli
@@ -1726,70 +1787,161 @@ run_cli() {{
     # TIMEZONE}} family for the account/hostname/timezone answers, to run without prompts; with
     # none set it prompts interactively (fine over SSH). Each is forwarded ACROSS the sudo
     # boundary explicitly (only when set) so a restrictive sudoers env_reset cannot drop it.
+    #
+    # QUOTING: each forwarded value is `${{VAR:+"VAR=$VAR"}}` -- the DOUBLE QUOTES sit INSIDE the
+    # `:+` alternate so the whole `VAR=value` stays ONE word even when the value contains spaces
+    # (a password like "correct horse", a full name like "Ada Lovelace"), while an UNSET var
+    # still expands to nothing at all (no stray empty argument). Unquoted, a value with a space
+    # word-split into two args and `env` treated the second as the command to exec -- e.g.
+    # `--username-password='correct horse'` died with `env: 'horse': No such file or directory`
+    # (exit 127) and the installer never ran. The quotes fix that for every field.
     if ! sudo test -r '{INSTALL_CLI_SCRIPT_PATH}'; then
         echo "azzio-install: CLI installer not found at {INSTALL_CLI_SCRIPT_PATH}" >&2
         exit 1
     fi
     exec sudo -E env \\
-        ${{AZ_INSTALL_CHOICE:+AZ_INSTALL_CHOICE=$AZ_INSTALL_CHOICE}} \\
-        ${{AZ_INSTALL_DISK:+AZ_INSTALL_DISK=$AZ_INSTALL_DISK}} \\
-        ${{AZ_INSTALL_HOSTNAME:+AZ_INSTALL_HOSTNAME=$AZ_INSTALL_HOSTNAME}} \\
-        ${{AZ_INSTALL_USERNAME:+AZ_INSTALL_USERNAME=$AZ_INSTALL_USERNAME}} \\
-        ${{AZ_INSTALL_FULLNAME:+AZ_INSTALL_FULLNAME=$AZ_INSTALL_FULLNAME}} \\
-        ${{AZ_INSTALL_PASSWORD:+AZ_INSTALL_PASSWORD=$AZ_INSTALL_PASSWORD}} \\
-        ${{AZ_INSTALL_ROOT_PASSWORD:+AZ_INSTALL_ROOT_PASSWORD=$AZ_INSTALL_ROOT_PASSWORD}} \\
-        ${{AZ_INSTALL_TIMEZONE:+AZ_INSTALL_TIMEZONE=$AZ_INSTALL_TIMEZONE}} \\
-        ${{AZ_INSTALL_FILESYSTEM:+AZ_INSTALL_FILESYSTEM=$AZ_INSTALL_FILESYSTEM}} \\
-        ${{AZ_INSTALL_STAR_PASSWORD:+AZ_INSTALL_STAR_PASSWORD=$AZ_INSTALL_STAR_PASSWORD}} \\
+        ${{AZ_INSTALL_CHOICE:+"AZ_INSTALL_CHOICE=$AZ_INSTALL_CHOICE"}} \\
+        ${{AZ_INSTALL_DISK:+"AZ_INSTALL_DISK=$AZ_INSTALL_DISK"}} \\
+        ${{AZ_INSTALL_HOSTNAME:+"AZ_INSTALL_HOSTNAME=$AZ_INSTALL_HOSTNAME"}} \\
+        ${{AZ_INSTALL_USERNAME:+"AZ_INSTALL_USERNAME=$AZ_INSTALL_USERNAME"}} \\
+        ${{AZ_INSTALL_FULLNAME:+"AZ_INSTALL_FULLNAME=$AZ_INSTALL_FULLNAME"}} \\
+        ${{AZ_INSTALL_PASSWORD:+"AZ_INSTALL_PASSWORD=$AZ_INSTALL_PASSWORD"}} \\
+        ${{AZ_INSTALL_ROOT_PASSWORD:+"AZ_INSTALL_ROOT_PASSWORD=$AZ_INSTALL_ROOT_PASSWORD"}} \\
+        ${{AZ_INSTALL_TIMEZONE:+"AZ_INSTALL_TIMEZONE=$AZ_INSTALL_TIMEZONE"}} \\
+        ${{AZ_INSTALL_FILESYSTEM:+"AZ_INSTALL_FILESYSTEM=$AZ_INSTALL_FILESYSTEM"}} \\
+        ${{AZ_INSTALL_STAR_PASSWORD:+"AZ_INSTALL_STAR_PASSWORD=$AZ_INSTALL_STAR_PASSWORD"}} \\
         bash '{INSTALL_CLI_SCRIPT_PATH}'
 }}
 
 run_auto() {{
     # Fully-unattended install (`-a`/`--auto`/`--automatic`). It is `run_cli` with EVERY answer
-    # pre-seeded to the fixed defaults from the spec, so there is ONE install code path -- the
-    # scripted installer -- and --auto is simply "the CLI installer, no questions asked". Not
-    # gated on a display: it runs on the console and over SSH alike.
+    # pre-seeded to a fixed default, so there is ONE install code path -- the scripted
+    # installer -- and --auto is simply "the CLI installer, no questions asked". Not gated on a
+    # display: it runs on the console and over SSH alike.
     #
-    #   timezone Asia/Jerusalem   language English (the distro's fixed locale -- nothing to set)
-    #   disk     the largest FIXED disk (AZ_INSTALL_CHOICE=1 skips removable/USB), whole disk,
-    #            no swap, btrfs (AZ_INSTALL_FILESYSTEM=btrfs -- parity with the Calamares GUI's
-    #            defaultFileSystemType), unencrypted (the CLI path never encrypts)
-    #   user     main   full name skipped (empty)   hostname azzio
-    #   passwords '*' for user AND root -- the Ubuntu/casper convention (AZ_INSTALL_STAR_PASSWORD):
-    #            a literal '*' in the shadow field is an INVALID hash, so no password authenticates,
-    #            but the account is NOT locked (unlike '!'). The box stays usable exactly like the
-    #            live medium -- main autologins on tty1 and has NOPASSWD sudo, so the desktop comes
-    #            up; root just has no password login. A dedicated knob is used instead of
-    #            AZ_INSTALL_PASSWORD='*' (which would set the literal string '*' as a real password).
-    #   network  automatic DHCP -- the installed system enables NetworkManager with no static
-    #            profile, which IS DHCP, so there is nothing to configure here.
-    export AZ_INSTALL_CHOICE=1
-    export AZ_INSTALL_HOSTNAME=azzio
-    export AZ_INSTALL_USERNAME=main
+    # Each default can be OVERRIDDEN by an --auto sub-flag (parsed below into az_opt_*; an unset
+    # az_opt_* means "use the default here"). The `${{az_opt_X:-DEFAULT}}` idiom below is what
+    # makes "whatever is omitted assumes default" true: a flag the user did not pass leaves its
+    # az_opt_ empty, so the default wins.
+    #
+    #   disk      --disk: "auto" (default) = largest FIXED disk (AZ_INSTALL_CHOICE=1, skips
+    #             removable/USB); any other value (e.g. "sda", "nvme0n1") = that device
+    #             (AZ_INSTALL_CHOICE=2 + AZ_INSTALL_DISK). Whole disk, no swap, unencrypted.
+    #   filesystem btrfs (AZ_INSTALL_FILESYSTEM=btrfs -- parity with the Calamares GUI's
+    #             defaultFileSystemType). Not a sub-flag; --auto is always btrfs.
+    #   hostname  --hostname (default "azzio")      user  --username (default "main")
+    #   full name always blank (cosmetic GECOS; the scripted installer never prompts for it)
+    #   timezone  --timezone (default "Asia/Jerusalem")   language English (fixed locale)
+    #   passwords --username-password (default "admin") sets the user password. Root reuses it
+    #             when --share-username-root-password is "True" (the default); with "False" the
+    #             root password is --root-password (default "admin") instead. So a bare
+    #             `azzio-install --auto` gives user "admin" and root "admin" (shared) -- the
+    #             values the spec's flag table lists as defaults.
+    #   network   automatic DHCP -- the installed system enables NetworkManager with no static
+    #             profile, which IS DHCP, so there is nothing to configure here.
+    az_disk="${{az_opt_disk:-auto}}"
+    if [ "$az_disk" = "auto" ]; then
+        export AZ_INSTALL_CHOICE=1
+    else
+        export AZ_INSTALL_CHOICE=2
+        export AZ_INSTALL_DISK="$az_disk"
+    fi
+    export AZ_INSTALL_HOSTNAME="${{az_opt_hostname:-azzio}}"
+    export AZ_INSTALL_USERNAME="${{az_opt_username:-main}}"
     export AZ_INSTALL_FULLNAME=
-    export AZ_INSTALL_TIMEZONE=Asia/Jerusalem
+    export AZ_INSTALL_TIMEZONE="${{az_opt_timezone:-Asia/Jerusalem}}"
     export AZ_INSTALL_FILESYSTEM=btrfs
-    export AZ_INSTALL_STAR_PASSWORD=1
+
+    # Passwords. --auto uses real passwords ("admin" by default), NOT the '*'/casper convention,
+    # so the box is reachable by password out of the box (the operator workflow logs in as the
+    # user with this password). AZ_INSTALL_STAR_PASSWORD is deliberately NOT set: the scripted
+    # installer's identity step gates its whole password section on that marker, so leaving it
+    # unset selects the real-password (chpasswd) path and honours AZ_INSTALL_PASSWORD /
+    # AZ_INSTALL_ROOT_PASSWORD non-interactively.
+    export AZ_INSTALL_PASSWORD="${{az_opt_user_password:-admin}}"
+    az_share="${{az_opt_share_root_password:-True}}"
+    case "$az_share" in
+        [tT][rR][uU][eE]) export AZ_INSTALL_ROOT_PASSWORD="$AZ_INSTALL_PASSWORD" ;;  # root == user
+        *)                export AZ_INSTALL_ROOT_PASSWORD="${{az_opt_root_password:-admin}}" ;;
+    esac
     run_cli
 }}
 
-# No default action: with no option (or -h/--help) we print help and exit. A mode must be
-# chosen explicitly. `mode` stays empty until a -g/-c/-a flag sets it.
+# Parse the command line. A MODE must be chosen explicitly (-g/-c/-a); `mode` stays empty until
+# one is set, and a bare invocation (or -h/--help) prints help and exits. The --auto sub-flags
+# (--disk/--hostname/--username/--username-password/--share-username-root-password/
+# --root-password/--timezone) are collected into az_opt_* here and consumed by run_auto; they
+# ONLY apply to --auto (see the post-loop gate). `az_seen_auto_flag` records that at least one
+# sub-flag was passed so we can reject them when --auto was not.
 mode=
+az_seen_auto_flag=
+# require_value "$@" : guard for a space-separated flag ("--flag val") -- error out with help
+# if the flag has no following value ($# would be 1, just the flag). The caller then does
+# `shift; var="$1"` to consume the value itself.
+require_value() {{
+    if [ "$#" -lt 2 ]; then
+        echo "azzio-install: option '$1' requires a value" >&2; usage >&2; exit 2
+    fi
+}}
 while [ $# -gt 0 ]; do
     case "$1" in
         -g|--gui|--graphical-user-interface) mode=gui ;;
         -c|--cli|--command-line-interface) mode=cli ;;
         -a|--auto|--automatic) mode=auto ;;
-        --disk) shift; AZ_INSTALL_CHOICE=2; AZ_INSTALL_DISK="$1"
-                export AZ_INSTALL_CHOICE AZ_INSTALL_DISK ;;
-        --disk=*) AZ_INSTALL_CHOICE=2; AZ_INSTALL_DISK="${{1#--disk=}}"
-                export AZ_INSTALL_CHOICE AZ_INSTALL_DISK ;;
+        # --disk is dual-purpose: `--cli --disk <dev>` pre-seeds the interactive CLI installer's
+        # disk step directly (AZ_INSTALL_CHOICE=2 + AZ_INSTALL_DISK), while `--auto --disk=<dev>`
+        # (or "auto") is recorded as an override run_auto resolves. Recording it in az_opt_disk
+        # AND (for the --cli combo) exporting the CHOICE/DISK pair keeps both working.
+        --disk) require_value "$@"; shift; az_opt_disk="$1"; az_seen_auto_flag=1
+                if [ "$az_opt_disk" != "auto" ]; then
+                    AZ_INSTALL_CHOICE=2; AZ_INSTALL_DISK="$az_opt_disk"
+                    export AZ_INSTALL_CHOICE AZ_INSTALL_DISK
+                fi ;;
+        --disk=*) az_opt_disk="${{1#--disk=}}"; az_seen_auto_flag=1
+                if [ "$az_opt_disk" != "auto" ]; then
+                    AZ_INSTALL_CHOICE=2; AZ_INSTALL_DISK="$az_opt_disk"
+                    export AZ_INSTALL_CHOICE AZ_INSTALL_DISK
+                fi ;;
+        --hostname) require_value "$@"; shift; az_opt_hostname="$1"; az_seen_auto_flag=1 ;;
+        --hostname=*) az_opt_hostname="${{1#--hostname=}}"; az_seen_auto_flag=1 ;;
+        --username) require_value "$@"; shift; az_opt_username="$1"; az_seen_auto_flag=1 ;;
+        --username=*) az_opt_username="${{1#--username=}}"; az_seen_auto_flag=1 ;;
+        --username-password) require_value "$@"; shift; az_opt_user_password="$1"; az_seen_auto_flag=1 ;;
+        --username-password=*) az_opt_user_password="${{1#--username-password=}}"; az_seen_auto_flag=1 ;;
+        --share-username-root-password) require_value "$@"; shift; az_opt_share_root_password="$1"; az_seen_auto_flag=1 ;;
+        --share-username-root-password=*) az_opt_share_root_password="${{1#--share-username-root-password=}}"; az_seen_auto_flag=1 ;;
+        --root-password) require_value "$@"; shift; az_opt_root_password="$1"; az_seen_auto_flag=1 ;;
+        --root-password=*) az_opt_root_password="${{1#--root-password=}}"; az_seen_auto_flag=1 ;;
+        --timezone) require_value "$@"; shift; az_opt_timezone="$1"; az_seen_auto_flag=1 ;;
+        --timezone=*) az_opt_timezone="${{1#--timezone=}}"; az_seen_auto_flag=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "azzio-install: unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
+
+# GATE: the identity/disk sub-flags only make sense with --auto (they seed run_auto's answers).
+# The lone exception is `--cli --disk <dev>`, the long-standing combo that pre-seeds the
+# interactive installer's disk prompt -- so --disk with --cli is allowed, but the OTHER sub-flags
+# (hostname/username/passwords/timezone) require --auto. Reject a sub-flag given without --auto
+# rather than silently ignoring it (a silent no-op would install with defaults the user thought
+# they had overridden).
+if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then
+    az_bad=
+    [ -n "$az_opt_hostname" ] && az_bad="$az_bad --hostname"
+    [ -n "$az_opt_username" ] && az_bad="$az_bad --username"
+    [ -n "$az_opt_user_password" ] && az_bad="$az_bad --username-password"
+    [ -n "$az_opt_share_root_password" ] && az_bad="$az_bad --share-username-root-password"
+    [ -n "$az_opt_root_password" ] && az_bad="$az_bad --root-password"
+    [ -n "$az_opt_timezone" ] && az_bad="$az_bad --timezone"
+    # --disk is allowed alongside --cli; only flag it here if --disk was given without --cli either.
+    [ -n "$az_opt_disk" ] && [ "$mode" != "cli" ] && az_bad="$az_bad --disk"
+    if [ -n "$az_bad" ]; then
+        echo "azzio-install: these options require --auto:$az_bad" >&2
+        usage >&2
+        exit 2
+    fi
+fi
 
 case "$mode" in
     gui) run_gui ;;

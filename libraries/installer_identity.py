@@ -12,10 +12,12 @@ scripted path reaches parity on those user-facing choices (see data/PROMPT.md: "
 entire process through the command line ... the same result"):
 
   identity_collect_sh()  -- runs BEFORE the destructive wipe: prompt (or read from env for
-                            an unattended SSH install) for hostname / full name / username /
-                            user password / root password / timezone, validate, and stash
-                            them in shell variables. Prompting first means a mistyped answer
-                            costs nothing -- no disk has been touched yet.
+                            an unattended SSH install) for hostname / username / user
+                            password / root password / timezone, validate, and stash them in
+                            shell variables. Prompting first means a mistyped answer costs
+                            nothing -- no disk has been touched yet. The full name is NOT
+                            prompted (cosmetic GECOS only): it is honoured from
+                            AZ_INSTALL_FULLNAME when explicitly set, else left blank.
   identity_write_sh()    -- runs AFTER the target root is mounted at /mnt: persist the
                             collected answers under /mnt/etc/install_info/ so the chroot can
                             read them (the same install_info channel disk/is_uefi already use).
@@ -54,11 +56,14 @@ def identity_collect_sh() -> str:
     BEFORE the disk is wiped. Each answer is taken from its AZ_INSTALL_* env var when set
     (unattended SSH install) or read interactively otherwise; passwords are read with `read
     -s` (no echo) and confirmed. Timezone and username are validated; a bad answer re-prompts
-    interactively, or aborts a pre-seeded run rather than silently install something wrong."""
+    interactively, or aborts a pre-seeded run rather than silently install something wrong.
+    The full name is the ONE field that is never prompted (cosmetic GECOS only): it is taken
+    from AZ_INSTALL_FULLNAME when set and otherwise left blank."""
     return r"""
 # --- Identity (hostname / user / passwords / timezone) ----------------------
-# Collected BEFORE the wipe so a typo is free. Every field honours an AZ_INSTALL_* env var
-# for unattended SSH installs; unset fields are prompted for interactively.
+# Collected BEFORE the wipe so a typo is free. Every PROMPTED field honours an AZ_INSTALL_*
+# env var for unattended SSH installs; unset fields are prompted for interactively. The full
+# name is not prompted at all -- AZ_INSTALL_FULLNAME or blank.
 echo
 echo -e "${LIGHT_BLUE}System configuration${RESET} (press Enter to accept the [default])"
 
@@ -71,20 +76,17 @@ else
     az_hostname="${az_hostname:-azzio}"
 fi
 
-# Full name (optional, cosmetic GECOS field). Skipped entirely under the unattended/auto
-# marker (AZ_INSTALL_STAR_PASSWORD, which `azzio-install --auto` sets): the full name is
-# intentionally blank there (spec: full_name=NULL, skip), and an empty AZ_INSTALL_FULLNAME
-# cannot survive run_cli()'s `${VAR:+...}` sudo forwarding, so it would arrive UNSET and
-# fall through to this interactive prompt -- blocking the "no questions asked" auto run.
-# Gate on the same auto marker the password prompts use, then leave az_fullname empty.
+# Full name (optional, cosmetic GECOS field). NEVER PROMPTED (spec: "azzio-install --cli
+# ... remove full name prompting"). It is a purely cosmetic field, so the scripted install
+# does not ask for it interactively at all: it is taken ONLY from AZ_INSTALL_FULLNAME when
+# that is explicitly pre-seeded, and otherwise left blank. This also makes --auto (which
+# does not set it) fall straight through to the empty case with no prompt to block on.
 if [ -n "$AZ_INSTALL_FULLNAME" ]; then
     az_fullname="$AZ_INSTALL_FULLNAME"
     echo "Full name: $az_fullname (pre-seeded)"
-elif [ -n "$AZ_INSTALL_STAR_PASSWORD" ]; then
+else
     az_fullname=
     echo "Full name: (skipped)"
-else
-    read -rp "Your full name (optional): " az_fullname
 fi
 
 # Login user name. Must match a POSIX-ish account name; re-prompt (or abort a seeded run).

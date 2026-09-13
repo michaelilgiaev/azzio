@@ -185,25 +185,195 @@ def test_install_wrapper_disk_preseeds_the_installer():
 
 
 def test_install_wrapper_auto_is_fully_unattended_with_fixed_defaults():
-    # PROMPT.md: `--auto` applies the FIXED defaults with no prompts. run_auto must export
-    # every one of them, then delegate to the same scripted-installer path (run_cli). Assert
-    # each fixed default is set: largest disk, hostname azzio, user main, empty full name,
-    # Asia/Jerusalem, btrfs, and the '*'-password (Ubuntu/casper) knob. DHCP is the installed
-    # default (NetworkManager, no static profile), so there is nothing to assert for network.
+    # PROMPT.md: `--auto` applies defaults with no prompts (each overridable by a sub-flag, see
+    # test_install_wrapper_auto_sub_flags_*). run_auto resolves every answer -- via the
+    # `${az_opt_*:-DEFAULT}` idiom so an omitted flag keeps its default -- then delegates to the
+    # single scripted-installer path (run_cli). Assert the DEFAULTS: largest disk, hostname
+    # azzio, user main, blank full name, Asia/Jerusalem, btrfs, and REAL "admin" passwords for
+    # user and root (the spec's flag table lists admin as the password default; --auto no longer
+    # uses the '*' casper convention). DHCP is the installed default, so nothing to assert there.
     w = desktop.install_wrapper_sh()
     assert "run_auto()" in w
     assert "export AZ_INSTALL_CHOICE=1" in w              # largest fixed disk (skips USB)
-    assert "export AZ_INSTALL_HOSTNAME=azzio" in w
-    assert "export AZ_INSTALL_USERNAME=main" in w
-    assert "export AZ_INSTALL_FULLNAME=" in w             # empty -> skipped
-    assert "export AZ_INSTALL_TIMEZONE=Asia/Jerusalem" in w
+    assert 'export AZ_INSTALL_HOSTNAME="${az_opt_hostname:-azzio}"' in w
+    assert 'export AZ_INSTALL_USERNAME="${az_opt_username:-main}"' in w
+    assert "export AZ_INSTALL_FULLNAME=" in w             # blank -> skipped (never prompted)
+    assert 'export AZ_INSTALL_TIMEZONE="${az_opt_timezone:-Asia/Jerusalem}"' in w
     assert "export AZ_INSTALL_FILESYSTEM=btrfs" in w      # parity with the Calamares GUI
-    assert "export AZ_INSTALL_STAR_PASSWORD=1" in w       # '*' for user + root
+    # Real passwords, defaulting to admin; NO star/casper knob under --auto anymore.
+    assert 'export AZ_INSTALL_PASSWORD="${az_opt_user_password:-admin}"' in w
+    assert "export AZ_INSTALL_STAR_PASSWORD=1" not in w
     # run_auto funnels into the single install path.
     assert "run_cli" in w
-    # run_cli forwards the two new knobs across the sudo boundary too.
+    # run_cli still forwards the filesystem knob across the sudo boundary.
     assert "AZ_INSTALL_FILESYSTEM=$AZ_INSTALL_FILESYSTEM" in w
-    assert "AZ_INSTALL_STAR_PASSWORD=$AZ_INSTALL_STAR_PASSWORD" in w
+
+
+def test_install_wrapper_auto_password_defaults_admin_shared():
+    # Default password policy for a bare `azzio-install --auto`: user "admin", and root SHARES
+    # it (--share-username-root-password default True). Assert the share default and both arms:
+    # True -> root == user password; anything else -> root == --root-password (default admin).
+    w = desktop.install_wrapper_sh()
+    assert 'az_share="${az_opt_share_root_password:-True}"' in w        # default shared
+    assert 'export AZ_INSTALL_ROOT_PASSWORD="$AZ_INSTALL_PASSWORD"' in w  # True arm: reuse user pw
+    assert 'export AZ_INSTALL_ROOT_PASSWORD="${az_opt_root_password:-admin}"' in w  # False arm
+
+
+def test_install_wrapper_auto_sub_flags_are_parsed():
+    # The seven --auto sub-flags must each be parsed in BOTH the `--flag value` and `--flag=value`
+    # forms into an az_opt_* the resolver consumes. Assert every flag token appears.
+    w = desktop.install_wrapper_sh()
+    for flag, var in (
+        ("--hostname", "az_opt_hostname"),
+        ("--username", "az_opt_username"),
+        ("--username-password", "az_opt_user_password"),
+        ("--share-username-root-password", "az_opt_share_root_password"),
+        ("--root-password", "az_opt_root_password"),
+        ("--timezone", "az_opt_timezone"),
+        ("--disk", "az_opt_disk"),
+    ):
+        assert f"{flag})" in w, f"missing space-form parse for {flag}"
+        assert f"{flag}=*)" in w, f"missing =-form parse for {flag}"
+        assert var in w, f"flag {flag} not captured into {var}"
+
+
+def test_install_wrapper_auto_sub_flags_require_auto():
+    # SPEC: "if --auto was not passed in then these flags shouldn't work." The wrapper must
+    # REJECT a sub-flag given without --auto (exit non-zero + help), not silently ignore it.
+    # Assert the gate exists and names the requirement.
+    w = desktop.install_wrapper_sh()
+    assert 'if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then' in w
+    assert "require --auto" in w
+    # --disk stays allowed with --cli (the long-standing combo), so the gate excludes that case.
+    assert '[ "$mode" != "cli" ]' in w
+
+
+def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
+    # Behavioural: drive the REAL wrapper (run_cli/run_gui execs replaced by a probe that dumps
+    # the resolved AZ_INSTALL_* env) through several flag combinations and assert the resolved
+    # environment. This is the actual contract -- parsing + run_auto resolution + the gate --
+    # exercised as bash, not just string-matched.
+    import re
+    import subprocess
+
+    w = desktop.install_wrapper_sh()
+    probe = w.replace(
+        "    exec sudo -E env \\",
+        '    { echo "CHOICE=${AZ_INSTALL_CHOICE-} DISK=${AZ_INSTALL_DISK-} '
+        'HOST=${AZ_INSTALL_HOSTNAME-} USER=${AZ_INSTALL_USERNAME-} '
+        'FULL=[${AZ_INSTALL_FULLNAME-}] TZ=${AZ_INSTALL_TIMEZONE-} FS=${AZ_INSTALL_FILESYSTEM-} '
+        'PW=${AZ_INSTALL_PASSWORD-} ROOTPW=${AZ_INSTALL_ROOT_PASSWORD-} '
+        'STAR=${AZ_INSTALL_STAR_PASSWORD-}"; exit 0; }\n    exec true \\',
+        1,
+    ).replace("if ! sudo test -r", "if ! true && ! sudo test -r")
+    path = tmp_path / "probe.sh"
+    path.write_text(probe)
+
+    def run(args):
+        return subprocess.run(["bash", str(path), *args], capture_output=True,
+                              text=True, timeout=20)
+
+    def f(out, key):
+        m = re.search(rf"\b{key}=(\[[^\]]*\]|\S*)", out)
+        return m.group(1) if m else None
+
+    # bare --auto -> admin/admin shared, largest disk, azzio/main, no star.
+    r = run(["--auto"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "CHOICE") == "1"
+    assert f(r.stdout, "HOST") == "azzio" and f(r.stdout, "USER") == "main"
+    assert f(r.stdout, "PW") == "admin" and f(r.stdout, "ROOTPW") == "admin"
+    assert f(r.stdout, "STAR") == "" and f(r.stdout, "FULL") == "[]"
+
+    # full overrides (both = and space forms exercised elsewhere; = here).
+    r = run(["--auto", "--disk=sda", "--hostname=box", "--username=me",
+             "--username-password=secret", "--share-username-root-password=False",
+             "--root-password=rootsecret", "--timezone=Europe/London"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "CHOICE") == "2" and f(r.stdout, "DISK") == "sda"
+    assert f(r.stdout, "HOST") == "box" and f(r.stdout, "USER") == "me"
+    assert f(r.stdout, "PW") == "secret" and f(r.stdout, "ROOTPW") == "rootsecret"
+    assert f(r.stdout, "TZ") == "Europe/London"
+
+    # share True -> root reuses user password.
+    r = run(["--auto", "--username-password=hunter2", "--share-username-root-password=True"])
+    assert f(r.stdout, "PW") == "hunter2" and f(r.stdout, "ROOTPW") == "hunter2"
+
+    # --disk=auto keeps largest.
+    r = run(["--auto", "--disk=auto"])
+    assert f(r.stdout, "CHOICE") == "1" and f(r.stdout, "DISK") == ""
+
+    # gate: sub-flag without --auto exits 2.
+    r = run(["--hostname=x"])
+    assert r.returncode == 2 and "require --auto" in r.stderr
+
+    # --cli --disk still works (the allowed combo).
+    r = run(["--cli", "--disk", "sdb"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "CHOICE") == "2" and f(r.stdout, "DISK") == "sdb"
+
+    # missing value errors.
+    r = run(["--auto", "--hostname"])
+    assert r.returncode == 2 and "requires a value" in r.stderr
+
+
+def test_install_wrapper_forwards_whitespace_values_intact(tmp_path):
+    # REGRESSION (adversary-found): run_cli forwards each AZ_INSTALL_* across `sudo -E env` with
+    # `${VAR:+"VAR=$VAR"}`. The double quotes INSIDE the :+ are load-bearing -- without them a
+    # value with a space word-splits and `env` treats the tail as the command to exec, so
+    # `--auto --username-password='correct horse'` died with `env: 'horse': No such file or
+    # directory` (exit 127) and the installer never ran. This drives the REAL forwarding (sudo
+    # dropped, env kept, the target replaced by a probe that dumps the AZ_* it actually received)
+    # and asserts a whitespace password/hostname arrive as ONE value in the child environment.
+    import subprocess
+
+    w = desktop.install_wrapper_sh()
+    probe = w.replace("    exec sudo -E env \\", "    exec env \\", 1)
+    probe = probe.replace("if ! sudo test -r", "if ! true && ! sudo test -r")
+    probe = probe.replace(
+        f"        bash '{desktop.INSTALL_CLI_SCRIPT_PATH}'",
+        "        bash -c 'for v in PASSWORD ROOT_PASSWORD HOSTNAME USERNAME; do "
+        "eval \"val=\\${AZ_INSTALL_$v-<UNSET>}\"; echo \"AZ_INSTALL_$v=[$val]\"; done'")
+    path = tmp_path / "probe.sh"
+    path.write_text(probe)
+
+    # A user password with a space, shared to root by default.
+    r = subprocess.run(
+        ["bash", str(path), "--auto", "--username-password=correct horse"],
+        capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, f"whitespace password broke env forwarding: rc={r.returncode} {r.stderr}"
+    assert "AZ_INSTALL_PASSWORD=[correct horse]" in r.stdout, r.stdout
+    assert "AZ_INSTALL_ROOT_PASSWORD=[correct horse]" in r.stdout, r.stdout
+
+    # An independent root password with a space (share=False).
+    r = subprocess.run(
+        ["bash", str(path), "--auto", "--share-username-root-password=False",
+         "--root-password=my root pw", "--username-password=user pw"],
+        capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert "AZ_INSTALL_PASSWORD=[user pw]" in r.stdout, r.stdout
+    assert "AZ_INSTALL_ROOT_PASSWORD=[my root pw]" in r.stdout, r.stdout
+
+
+def test_install_wrapper_forwarding_omits_unset_vars(tmp_path):
+    # The other half of the quoting contract: an UNSET AZ_INSTALL_* must expand to NOTHING (no
+    # stray empty `env` argument), so a plain `--cli` run forwards none of them. Assert the child
+    # sees them all unset (proving `${VAR:+"..."}` still drops cleanly when the var is unset).
+    import subprocess
+
+    w = desktop.install_wrapper_sh()
+    probe = w.replace("    exec sudo -E env \\", "    exec env \\", 1)
+    probe = probe.replace("if ! sudo test -r", "if ! true && ! sudo test -r")
+    probe = probe.replace(
+        f"        bash '{desktop.INSTALL_CLI_SCRIPT_PATH}'",
+        "        bash -c 'for v in CHOICE DISK HOSTNAME USERNAME PASSWORD STAR_PASSWORD; do "
+        "eval \"val=\\${AZ_INSTALL_$v-<UNSET>}\"; echo \"AZ_INSTALL_$v=[$val]\"; done'")
+    path = tmp_path / "probe.sh"
+    path.write_text(probe)
+    r = subprocess.run(["bash", str(path), "--cli"], capture_output=True, text=True, timeout=20)
+    assert r.returncode == 0, r.stderr
+    for v in ("CHOICE", "DISK", "HOSTNAME", "USERNAME", "PASSWORD", "STAR_PASSWORD"):
+        assert f"AZ_INSTALL_{v}=[<UNSET>]" in r.stdout, f"{v} leaked a value: {r.stdout}"
 
 
 def test_install_wrapper_forwards_identity_env_across_sudo():
@@ -1637,6 +1807,73 @@ def test_bash_profile_guard_line_does_not_reference_xdg_vtnr():
 
 def test_bash_profile_sources_bashrc():
     assert "[[ -f ~/.bashrc ]] && . ~/.bashrc" in desktop.bash_profile_startx()
+
+
+# --- bash_profile: legacy-keyboard reset (the ssh "7;3u / 7;5u" junk fix) ----
+
+def test_bash_profile_resets_kitty_keyboard_protocol_for_interactive_shells():
+    # THE reported ssh bug: holding Ctrl/Alt over ssh spews `7;3u` / `7;5u` because the
+    # terminal (kitty) keeps its progressive/CSI-u keyboard protocol enabled across ssh,
+    # but the guest's plain bash cannot decode `ESC[<code>;<mod>u`, so the leaked tail
+    # prints. The interactive login shell must ask the terminal for LEGACY keys: push an
+    # empty kitty-keyboard flag set (ESC[>0u) and turn xterm modifyOtherKeys off (ESC[>4;0m).
+    out = desktop.bash_profile_startx()
+    # Gated on an interactive shell (ssh/rescue login is interactive; tty1 exec-startx's
+    # before any prompt so this is a no-op there).
+    assert "if [[ $- == *i* ]]; then" in out
+    # The exact disable sequences, emitted only when fd 1 is a terminal.
+    assert r"printf '\e[>0u\e[>4;0m'" in out
+    assert "[[ -t 1 ]]" in out
+    # Re-asserted every prompt so a TUI that re-enabled the protocol and died uncleanly
+    # cannot leave the next prompt spewing `...u`.
+    assert "_azzio_legacy_keys" in out
+    assert "PROMPT_COMMAND" in out
+
+
+def test_bash_profile_legacy_keys_emitted_on_interactive_login(tmp_path):
+    # Behavioural: an INTERACTIVE bash sourcing the profile with a pty on stdout must emit
+    # the legacy-keyboard reset bytes (ESC[>0u ESC[>4;0m). Driven through a real pty so the
+    # `[[ -t 1 ]]` guard is satisfied, exactly like an ssh session. A regression that dropped
+    # the reset (or mis-gated it) would emit nothing here, re-exposing the `7;3u` junk.
+    import os
+    import pty
+
+    (tmp_path / "bp.sh").write_text(desktop.bash_profile_startx())
+    script = f"source {tmp_path / 'bp.sh'}; exit 0"
+
+    out = bytearray()
+    pid, fd = pty.fork()
+    if pid == 0:  # child: an interactive shell (no rc noise) that sources the profile
+        os.execvp("bash", ["bash", "--norc", "--noprofile", "-ic", script])
+    else:
+        try:
+            while True:
+                try:
+                    data = os.read(fd, 1024)
+                except OSError:
+                    break
+                if not data:
+                    break
+                out += data
+        finally:
+            os.waitpid(pid, 0)
+    assert b"\x1b[>0u\x1b[>4;0m" in bytes(out), repr(bytes(out)[:200])
+
+
+def test_bash_profile_legacy_keys_not_emitted_when_non_interactive(tmp_path):
+    # The reset must NOT fire for a NON-interactive shell (e.g. `hypervisor ssh -- cmd`,
+    # or any piped/scripted invocation): emitting escape bytes there would corrupt captured
+    # command output. Sourcing the profile in `bash -c` (non-interactive, stdout a pipe)
+    # must produce ZERO escape bytes -- only the command's own output.
+    import subprocess
+
+    (tmp_path / "bp.sh").write_text(desktop.bash_profile_startx())
+    r = subprocess.run(
+        ["bash", "-c", f"source {tmp_path / 'bp.sh'}; printf DONE"],
+        capture_output=True, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == b"DONE", repr(r.stdout)
 
 
 # --- Branding / wrapper / wallpaper constants -------------------------------
