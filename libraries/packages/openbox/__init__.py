@@ -1783,6 +1783,11 @@ Usage: azzioinstall [ -g | -c | -a [instant-options] | --cli --disk <dev> ] [ -h
                                    False: root uses --root-password instead.
         --root-password=<pw>       Root password when not shared (default admin).
         --timezone=<zone>          e.g. Europe/London            (default Asia/Jerusalem).
+        --ssh=<pw>                 Enable ssh on the INSTALLED system (NOT the live session):
+                                   the installed box brings sshd up at boot for the login
+                                   user. <pw> is that user's password too when
+                                   --username-password is omitted, so `--ssh=admin` alone
+                                   gives an ssh-reachable account. Also valid with --cli.
         --final=idle|reboot|shutdown
                                    What to do after the install finishes:
                                    idle (default) = print "you can reboot now" and return
@@ -1797,6 +1802,10 @@ Usage: azzioinstall [ -g | -c | -a [instant-options] | --cli --disk <dev> ] [ -h
   --cli --disk <dev>  Use /dev/<dev> (e.g. sda, nvme0n1) as the target instead of asking
                       which disk. Only meaningful with --cli (--instant uses --disk=<dev>).
 
+  --cli --ssh <pw>    --ssh also works with --cli (see the --instant note above): it turns
+                      sshd on for the login user on the INSTALLED system. The live terminal
+                      session running the installer is unaffected.
+
 The CLI and GUI installers produce the same system (same packages, same chroot setup, a
 real user account, a root password, a hostname, and a timezone). All install modes ERASE
 the target disk.
@@ -1808,7 +1817,8 @@ environment directly (the --instant sub-flags are the friendly front-end for the
   azzioinstall --cli
 Recognised: AZ_INSTALL_DISK, AZ_INSTALL_HOSTNAME, AZ_INSTALL_USERNAME, AZ_INSTALL_FULLNAME,
 AZ_INSTALL_PASSWORD, AZ_INSTALL_ROOT_PASSWORD, AZ_INSTALL_TIMEZONE, AZ_INSTALL_FILESYSTEM
-(ext4 default, or btrfs), AZ_INSTALL_CHOICE, and AZ_INSTALL_FINAL (idle/reboot/shutdown).
+(ext4 default, or btrfs), AZ_INSTALL_CHOICE, AZ_INSTALL_SSH (ssh on the installed system;
+the --ssh sub-flag sets it), and AZ_INSTALL_FINAL (idle/reboot/shutdown).
 Any prompt left un-seeded is asked interactively.
 EOF
 }}
@@ -1865,6 +1875,7 @@ run_cli() {{
         ${{AZ_INSTALL_TIMEZONE:+"AZ_INSTALL_TIMEZONE=$AZ_INSTALL_TIMEZONE"}} \\
         ${{AZ_INSTALL_FILESYSTEM:+"AZ_INSTALL_FILESYSTEM=$AZ_INSTALL_FILESYSTEM"}} \\
         ${{AZ_INSTALL_STAR_PASSWORD:+"AZ_INSTALL_STAR_PASSWORD=$AZ_INSTALL_STAR_PASSWORD"}} \\
+        ${{AZ_INSTALL_SSH:+"AZ_INSTALL_SSH=$AZ_INSTALL_SSH"}} \\
         ${{AZ_INSTALL_FINAL:+"AZ_INSTALL_FINAL=$AZ_INSTALL_FINAL"}} \\
         bash '{INSTALL_CLI_SCRIPT_PATH}'
 }}
@@ -1912,13 +1923,25 @@ run_auto() {{
     export AZ_INSTALL_TIMEZONE="${{az_opt_timezone:-Asia/Jerusalem}}"
     export AZ_INSTALL_FILESYSTEM=btrfs
 
+    # SSH ON THE INSTALLED SYSTEM (`--ssh=<pw>`). Forwarded as AZ_INSTALL_SSH so the scripted
+    # installer enables sshd on the INSTALLED box (NOT the live session -- see run_cli). An unset
+    # az_opt_ssh leaves AZ_INSTALL_SSH empty and ssh stays off (the default). This is what the
+    # instant ISO's baked hook uses (`--ssh=admin`): the live auto-install session has no ssh, but
+    # the installed hypervisor does.
+    export AZ_INSTALL_SSH="${{az_opt_ssh:-}}"
+
     # Passwords. --instant uses real passwords ("admin" by default), NOT the '*'/casper convention,
     # so the box is reachable by password out of the box (the operator workflow logs in as the
     # user with this password). AZ_INSTALL_STAR_PASSWORD is deliberately NOT set: the scripted
     # installer's identity step gates its whole password section on that marker, so leaving it
     # unset selects the real-password (chpasswd) path and honours AZ_INSTALL_PASSWORD /
     # AZ_INSTALL_ROOT_PASSWORD non-interactively.
-    export AZ_INSTALL_PASSWORD="${{az_opt_user_password:-admin}}"
+    #
+    # When --ssh is given but --username-password is NOT, the ssh password becomes the login
+    # user's password too (`${{az_opt_ssh:-admin}}` fallback), so ONE `--ssh=<pw>` yields a
+    # working, ssh-reachable account with no separate password flag. An explicit --username-password
+    # still wins over both.
+    export AZ_INSTALL_PASSWORD="${{az_opt_user_password:-${{az_opt_ssh:-admin}}}}"
     az_share="${{az_opt_share_root_password:-True}}"
     case "$az_share" in
         [tT][rR][uU][eE]) export AZ_INSTALL_ROOT_PASSWORD="$AZ_INSTALL_PASSWORD" ;;  # root == user
@@ -1989,6 +2012,13 @@ while [ $# -gt 0 ]; do
         --root-password=*) az_opt_root_password="${{1#--root-password=}}"; az_seen_auto_flag=1 ;;
         --timezone) require_value "$@"; shift; az_opt_timezone="$1"; az_seen_auto_flag=1 ;;
         --timezone=*) az_opt_timezone="${{1#--timezone=}}"; az_seen_auto_flag=1 ;;
+        # --ssh=<pw>: enable sshd on the INSTALLED system (not the live session), with <pw> as the
+        # login password when --username-password is not given. Valid with --instant AND --cli
+        # (like --disk), so both a headless instant install and an interactive terminal install can
+        # turn ssh on. az_seen_auto_flag is deliberately NOT set here: --ssh is allowed on --cli, so
+        # it must not trip the "requires --instant" gate the OTHER sub-flags share.
+        --ssh) require_value "$@"; shift; az_opt_ssh="$1" ;;
+        --ssh=*) az_opt_ssh="${{1#--ssh=}}" ;;
         --final) require_value "$@"; shift; az_opt_final="$1"; az_seen_auto_flag=1 ;;
         --final=*) az_opt_final="${{1#--final=}}"; az_seen_auto_flag=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -2020,6 +2050,22 @@ if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then
         exit 2
     fi
 fi
+
+# GATE (--ssh): --ssh enables sshd on the INSTALLED system, so it only means something for an
+# install mode -- --instant (headless) or --cli (interactive). It is NOT a run_auto sub-flag (it
+# does not set az_seen_auto_flag, so the block above never sees it), and it does NOTHING under
+# --gui (Calamares) or a bare invocation, so reject it there rather than silently drop it.
+if [ -n "$az_opt_ssh" ] && [ "$mode" != "auto" ] && [ "$mode" != "cli" ]; then
+    echo "azzioinstall: --ssh requires --instant or --cli (it enables ssh on the installed system)." >&2
+    usage >&2
+    exit 2
+fi
+
+# --cli reaches run_cli DIRECTLY (not via run_auto), so export AZ_INSTALL_SSH here for the
+# interactive path -- run_cli forwards it across the sudo -E env line, but only if it is already
+# in the environment. run_auto re-exports it from az_opt_ssh itself, so this is idempotent for
+# --instant; empty az_opt_ssh (ssh not requested) leaves it unset and ssh stays off.
+[ -n "$az_opt_ssh" ] && export AZ_INSTALL_SSH="$az_opt_ssh"
 
 case "$mode" in
     gui) run_gui ;;

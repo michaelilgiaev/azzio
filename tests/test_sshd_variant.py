@@ -656,27 +656,66 @@ def test_all_azzioinstall_instant_subflags_are_mirrored():
 # --- resolving the azzioinstall command line ---------------------------------
 
 def test_instant_azzioinstall_args_bare():
-    assert compiler.instant_azzioinstall_args(["--instant"]) == ["--instant"]
+    # A bare --instant still resolves to `--instant`, PLUS the always-injected installed-system
+    # ssh sub-flag `--ssh=admin` (the instant ISO's live session has no ssh, but the INSTALLED
+    # box brings sshd up at boot -- see instant_azzioinstall_args). This is the friendly default
+    # the PROMPT asks for: `compile.sh --instant` -> hook runs `azzioinstall --instant --ssh=admin`.
+    assert compiler.instant_azzioinstall_args(["--instant"]) == ["--instant", "--ssh=admin"]
 
 
 def test_instant_azzioinstall_args_forwards_present_subflags_in_order():
     argv = ["--instant", "--final=reboot", "--username=me", "--hostname=box"]
     assert compiler.instant_azzioinstall_args(argv) == [
-        "--instant", "--hostname=box", "--username=me", "--final=reboot",
+        "--instant", "--hostname=box", "--username=me", "--final=reboot", "--ssh=admin",
     ]
 
 
 def test_instant_azzioinstall_args_omits_absent_subflags():
     args = compiler.instant_azzioinstall_args(["--instant", "--username=me"])
-    assert args == ["--instant", "--username=me"]
+    # Absent identity sub-flags stay absent; --ssh=admin is always appended (installed-system ssh).
+    assert args == ["--instant", "--username=me", "--ssh=admin"]
     assert not any(a.startswith("--hostname") for a in args)
 
 
-def test_instant_azzioinstall_args_drops_non_subflags():
-    # --ssh / --full-compile are NOT azzioinstall sub-flags and must not leak into the command.
+def test_instant_azzioinstall_args_passes_dynamic_username_through():
+    # The hypervisor tool builds with `--username=hypervisor`; it must reach the azzioinstall
+    # command line verbatim (so the installed account is `hypervisor`, and the sshd unit the
+    # installer writes is parameterized on it), alongside the default installed-system --ssh=admin.
+    args = compiler.instant_azzioinstall_args(["--instant", "--username=hypervisor"])
+    assert args == ["--instant", "--username=hypervisor", "--ssh=admin"]
+
+
+def test_instant_azzioinstall_args_drops_compiler_level_ssh_but_defaults_installed_ssh():
+    # The COMPILER-level --ssh=pw (live-session ssh + sshd ISO variant) and --full-compile are NOT
+    # azzioinstall sub-flags: the operator's `--ssh=pw` value must NOT leak into the azzioinstall
+    # command line. Instead the installed-system ssh is ALWAYS the fixed default `--ssh=admin`, so
+    # the resolved args carry `--ssh=admin` (never `--ssh=pw`). Guards the two --ssh meanings apart.
     args = compiler.instant_azzioinstall_args(
         ["--instant", "--ssh=pw", "--full-compile", "--hostname=box"])
-    assert args == ["--instant", "--hostname=box"]
+    assert args == ["--instant", "--hostname=box", "--ssh=admin"]
+    assert "--ssh=pw" not in args  # the compiler-level password never becomes the installed-ssh pw
+
+
+def test_instant_azzioinstall_args_always_carry_exactly_one_installed_ssh_flag():
+    # Every instant resolution ends with exactly ONE installed-system ssh sub-flag, whatever the
+    # other flags -- so the installed box always gets sshd, and the flag is never doubled.
+    for argv in (["--instant"], ["--instant", "--username=hypervisor"],
+                 ["--instant", "--ssh=live", "--hostname=box"],
+                 ["--instant", "--username-password=x"]):
+        args = compiler.instant_azzioinstall_args(argv)
+        ssh = [a for a in args if a == "--ssh" or a.startswith("--ssh=")]
+        assert ssh == ["--ssh=admin"], (argv, args)
+
+
+def test_instant_hook_end_to_end_installs_ssh_for_dynamic_username():
+    # THE PROMPT, end to end: `compile.sh --instant --username=hypervisor` (NO compiler --ssh) must
+    # bake a boot hook that execs `azzioinstall --instant ... --ssh=admin` for the chosen username.
+    # Live session has no ssh; the installed hypervisor account (`hypervisor`) is ssh-reachable.
+    args = compiler.instant_azzioinstall_args(["--instant", "--username=hypervisor"])
+    hook = openbox.instant_install_hook_sh(args)
+    exec_line = [ln for ln in hook.splitlines() if ln.startswith("exec ")][0]
+    assert exec_line.endswith("--instant --username=hypervisor --ssh=admin")
+    assert "--username=hypervisor" in exec_line and "--ssh=admin" in exec_line
 
 
 # --- check_instant_flag: validation matrix -----------------------------------
@@ -1063,6 +1102,10 @@ def test_main_threads_instant_args_into_run(monkeypatch):
 
     rc = compiler.main()
     assert rc == 0
+    # The resolved args reaching run() carry the operator's sub-flags PLUS the always-injected
+    # installed-system --ssh=admin (the instant ISO enables sshd on the installed box).
     assert captured.get("instant_azzioinstall_args") == [
-        "--instant", "--username=me", "--final=reboot"]
-    assert captured.get("ssh_password_hash") is None   # ssh not supplied -> no hash threaded
+        "--instant", "--username=me", "--final=reboot", "--ssh=admin"]
+    # No COMPILER-level --ssh was supplied, so no live-session ssh hash is threaded (that is a
+    # separate concern from the installed-system --ssh=admin above).
+    assert captured.get("ssh_password_hash") is None

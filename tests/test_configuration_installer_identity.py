@@ -326,5 +326,108 @@ def test_chroot_repoints_getty_autologin_after_rename():
     assert 'if [ "$az_login" != "main" ]; then' in s
 
 
+# --- ssh-on-the-installed-system (`azzioinstall --instant|--cli --ssh=<pw>`) --------
+
+def test_collect_reads_ssh_and_uses_it_as_password_fallback():
+    # AZ_INSTALL_SSH (set by the --ssh sub-flag) is read as az_ssh, exported, and -- when no
+    # explicit user password and no star-password -- adopted as the user password so a headless
+    # `--ssh=admin` installs a working, ssh-reachable account with no separate password flag.
+    s = idy.identity_collect_sh()
+    assert 'az_ssh="${AZ_INSTALL_SSH:-}"' in s
+    assert '[ -n "$az_ssh" ] && [ -z "$AZ_INSTALL_PASSWORD" ] && [ -z "$AZ_INSTALL_STAR_PASSWORD" ]' in s
+    assert 'AZ_INSTALL_PASSWORD="$az_ssh"' in s
+    # az_ssh is exported so identity_write / identity_chroot (separate bash phases) can see it.
+    assert "export" in s and "az_ssh" in s.split("export", 1)[1]
+
+
+def test_collect_ssh_password_fallback_is_noninteractive(tmp_path):
+    # Behavioural: with ONLY AZ_INSTALL_SSH set (no user/root password, no star), the collect
+    # fragment must run non-interactively AND resolve az_password to the ssh value. Mirrors the
+    # star-password behavioural test harness (env pre-seed, no tty).
+    import os
+    s = idy.identity_collect_sh()
+    # Drop the trailing `export ...` line's effect by echoing the resolved password after collect.
+    script = s + '\necho "PW=[$az_password] SSH=[$az_ssh]"\n'
+    env = dict(os.environ)
+    env.update({
+        "AZ_INSTALL_SSH": "admin",
+        "AZ_INSTALL_HOSTNAME": "box", "AZ_INSTALL_USERNAME": "hypervisor",
+        "AZ_INSTALL_TIMEZONE": "Asia/Jerusalem",
+        # no AZ_INSTALL_PASSWORD / ROOT_PASSWORD / STAR_PASSWORD on purpose.
+    })
+    r = subprocess.run(["bash", "-c", script], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, env=env, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert "PW=[admin]" in r.stdout and "SSH=[admin]" in r.stdout, r.stdout
+
+
+def test_collect_ssh_does_not_override_explicit_user_password(tmp_path):
+    # An explicit --username-password must WIN: az_ssh only fills the password when none was given.
+    import os
+    s = idy.identity_collect_sh()
+    script = s + '\necho "PW=[$az_password] SSH=[$az_ssh]"\n'
+    env = dict(os.environ)
+    env.update({
+        "AZ_INSTALL_SSH": "sshpw", "AZ_INSTALL_PASSWORD": "userpw",
+        "AZ_INSTALL_HOSTNAME": "box", "AZ_INSTALL_USERNAME": "me",
+        "AZ_INSTALL_TIMEZONE": "Asia/Jerusalem",
+    })
+    r = subprocess.run(["bash", "-c", script], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, env=env, timeout=20)
+    assert r.returncode == 0, r.stderr
+    assert "PW=[userpw]" in r.stdout and "SSH=[sshpw]" in r.stdout, r.stdout
+
+
+def test_write_persists_ssh_marker_only_when_requested():
+    # The ssh marker is NON-secret: it records only WHETHER to enable sshd on the installed box
+    # (the credential is the login password, persisted separately). Written only when az_ssh set.
+    s = idy.identity_write_sh()
+    assert 'if [ -n "$az_ssh" ]; then' in s
+    assert '''printf '%s' "1" > /mnt/etc/install_info/ssh''' in s
+    # Guarded (inside the `if [ -n "$az_ssh" ]`), so an ssh-less install writes NO ssh marker.
+    ssh_idx = s.index('if [ -n "$az_ssh" ]; then')
+    marker_idx = s.index("/install_info/ssh", ssh_idx)
+    assert ssh_idx < marker_idx, "ssh marker must be written only inside the az_ssh guard"
+
+
+def test_chroot_writes_and_enables_sshd_unit_when_ssh_marker_present():
+    # When the ssh marker exists, the chroot WRITES the sshd-hypervisor-setup unit into the target
+    # and ENABLES it (multi-user.target.wants symlink), then consumes the marker. The instant/cli
+    # install clones a NON-ssh rootfs, so the unit is not in the clone -- the installer writes it.
+    s = idy.identity_chroot_sh()
+    assert "if [ -f /etc/install_info/ssh ]; then" in s
+    assert "cat > /etc/systemd/system/sshd-hypervisor-setup.service <<EOF" in s
+    assert "multi-user.target.wants/sshd-hypervisor-setup.service" in s
+    assert "chmod 644 /etc/systemd/system/sshd-hypervisor-setup.service" in s
+    assert "rm -f /etc/install_info/ssh" in s
+
+
+def test_chroot_sshd_unit_is_login_parameterized_not_hardcoded_main():
+    # DYNAMIC username: the unit written into the target must set SUDO_USER to the CHOSEN login
+    # ($az_login), so `--username=hypervisor` brings sshd up for `hypervisor`, not `main`. This is
+    # what makes the hypervisor tool reach a renamed installed account over ssh.
+    s = idy.identity_chroot_sh()
+    assert "Environment=SUDO_USER=$az_login" in s
+    # The unit is written OUTSIDE the `az_login != main` rename branch (ssh must be enabled even
+    # when the login IS main), so its guard is the ssh marker, not the rename.
+    ssh_idx = s.index("if [ -f /etc/install_info/ssh ]; then")
+    env_idx = s.index("Environment=SUDO_USER=$az_login", ssh_idx)
+    assert ssh_idx < env_idx
+
+
+def test_chroot_sshd_unit_body_matches_system_builder():
+    # DRIFT GUARD: the heredoc body the chroot writes must be byte-for-byte the module builder
+    # system.sshd_hypervisor_setup_service("$az_login"). If either the installer heredoc or the
+    # system builder is edited without the other, this fails -- so the installed unit can never
+    # silently diverge from the canonical unit definition.
+    import system
+    s = idy.identity_chroot_sh()
+    marker = "sshd-hypervisor-setup.service <<EOF\n"
+    start = s.index(marker) + len(marker)
+    end = s.index("\nEOF", start)
+    body = s[start:end] + "\n"
+    assert body == system.sshd_hypervisor_setup_service("$az_login")
+
+
 def test_chroot_is_valid_bash():
     _bash_ok(idy.identity_chroot_sh())

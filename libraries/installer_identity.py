@@ -124,6 +124,22 @@ while :; do
     break
 done
 
+# SSH-on-the-installed-system (opt-in via AZ_INSTALL_SSH, set by `azzioinstall --instant|--cli
+# --ssh=<pw>`). This does NOT touch the live session -- it means "once the box is INSTALLED,
+# bring sshd up for the chosen login". Two effects: (a) it is the login user's password when no
+# explicit user password was given (so ssh PASSWORD login works out of the box), and (b) the
+# chroot step writes + enables the sshd-hypervisor-setup unit for $az_login (see
+# identity_chroot_sh). Recorded here as az_ssh (empty = ssh stays off, the historical default).
+# Using it as the password fallback is what makes the friendly `--ssh=admin` alone enough: the
+# operator gives ONE value and both "the account password" and "the ssh credential" are that.
+az_ssh="${AZ_INSTALL_SSH:-}"
+if [ -n "$az_ssh" ] && [ -z "$AZ_INSTALL_PASSWORD" ] && [ -z "$AZ_INSTALL_STAR_PASSWORD" ]; then
+    # No explicit user password, but ssh was requested: adopt the ssh password as the user
+    # password so a headless `--ssh=<pw>` (e.g. the instant ISO's baked `--ssh=admin`) installs a
+    # working, ssh-reachable account with no further prompting.
+    AZ_INSTALL_PASSWORD="$az_ssh"
+fi
+
 # STAR-PASSWORD convention (opt-in via AZ_INSTALL_STAR_PASSWORD=1 in the environment; no wrapper
 # flag sets it today -- `--instant` uses real "admin" passwords): both the
 # user and root get a literal '*' in the shadow field -- the Ubuntu/casper standard. '*' is an
@@ -191,7 +207,7 @@ while :; do
     if [ -n "$AZ_INSTALL_TIMEZONE" ]; then echo "Aborting (pre-seeded timezone is invalid)."; exit 1; fi
 done
 
-export az_hostname az_fullname az_username az_password az_root_password az_timezone az_star_password
+export az_hostname az_fullname az_username az_password az_root_password az_timezone az_star_password az_ssh
 """
 
 
@@ -207,6 +223,13 @@ printf '%s' "$az_hostname" > {INFO_DIR}/hostname
 printf '%s' "$az_username" > {INFO_DIR}/username
 printf '%s' "$az_fullname" > {INFO_DIR}/fullname
 printf '%s' "$az_timezone" > {INFO_DIR}/timezone
+# SSH-on-installed-system marker. Non-secret: it records only WHETHER to enable sshd on the
+# installed box (the actual credential is the login password, already persisted below). Written
+# only when ssh was requested (AZ_INSTALL_SSH), so its mere presence tells the chroot to write +
+# enable the sshd-hypervisor-setup unit for the chosen login.
+if [ -n "$az_ssh" ]; then
+    printf '%s' "1" > {INFO_DIR}/ssh
+fi
 # Passwords. Under the STAR-PASSWORD convention (AZ_INSTALL_STAR_PASSWORD) we persist only a
 # marker and NO plaintext: the chroot writes a literal '*' for user and root. Otherwise the collected
 # passwords go to root-only files (0600) that the chroot consumes and shreds.
@@ -230,6 +253,9 @@ def identity_chroot_sh() -> str:
                      preserve its uid/gid (1000/998) and its /home/main tree.
       * timezone  -> re-point /etc/localtime at the chosen zone (overriding the static
                      Asia/Jerusalem the shared locale block set) and re-sync the hwclock.
+      * ssh       -> when the ssh marker is present (`--ssh=<pw>` install), write + enable the
+                     sshd-hypervisor-setup unit for $az_login so the INSTALLED box brings sshd up
+                     at boot for the chosen account (the live session is unaffected).
 
     Password files are removed immediately after use so no plaintext survives on the target."""
     return f"""
@@ -309,6 +335,42 @@ if [ -d /etc/install_info ]; then
     if [ -n "$az_timezone" ] && [ -f "/usr/share/zoneinfo/$az_timezone" ]; then
         ln -sf "/usr/share/zoneinfo/$az_timezone" /etc/localtime
         hwclock --systohc 2>/dev/null || true
+    fi
+
+    # SSH ON THE INSTALLED SYSTEM (`azzioinstall --instant|--cli --ssh=<pw>`). The instant/cli
+    # install path clones a NON-ssh live rootfs (no sshd-hypervisor-setup unit), so unlike the
+    # `compile.sh --ssh` recipe we cannot rely on the clone carrying it. When the ssh marker is
+    # present we WRITE the unit into the target here and enable it, parameterized with the CHOSEN
+    # login ($az_login) -- so `--username=hypervisor` brings sshd up for `hypervisor`, not a
+    # hardcoded `main`. `azzio --sshd-hypervisor` (run by the unit at boot) resolves its target
+    # from SUDO_USER, opens :22, generates host keys, and enables sshd; it needs the login's
+    # account + password, both already applied above. This affects only the INSTALLED system --
+    # the live session that ran the installer is untouched (its ssh, if any, is a separate ISO
+    # variant concern). The enable-link mirrors the recipe's multi-user.target.wants symlink.
+    if [ -f /etc/install_info/ssh ]; then
+        mkdir -p /etc/systemd/system/multi-user.target.wants
+        cat > /etc/systemd/system/sshd-hypervisor-setup.service <<EOF
+[Unit]
+Description=Azzio sshd-hypervisor auto-setup (install host pubkey + start sshd)
+After=pkgs-setup.service
+Wants=pkgs-setup.service
+ConditionPathExists=/usr/local/bin/azzio
+
+[Service]
+Type=oneshot
+Environment=SUDO_USER=$az_login
+ExecStart=/usr/local/bin/azzio --sshd-hypervisor
+RemainAfterExit=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        chmod 644 /etc/systemd/system/sshd-hypervisor-setup.service
+        ln -sf /etc/systemd/system/sshd-hypervisor-setup.service \\
+            /etc/systemd/system/multi-user.target.wants/sshd-hypervisor-setup.service
+        rm -f /etc/install_info/ssh
     fi
 
     # FIRST-BOOT UNIT re-point. first-boot-setup.service hardcodes

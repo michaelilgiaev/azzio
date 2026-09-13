@@ -298,12 +298,25 @@ def instant_azzioinstall_args(argv: list[str]) -> list[str]:
     `--instant` followed by every sub-flag the operator supplied, forwarded VERBATIM as
     `--name=value` (so azzioinstall re-parses them with its own logic/defaults). Sub-flags the
     operator omitted are simply left out, so azzioinstall applies its built-in default for each.
-    Assumes check_instant_flag has already passed (valid combination)."""
+    Assumes check_instant_flag has already passed (valid combination).
+
+    ALWAYS ends with the azzioinstall SUB-flag `--ssh=admin` (unless already present): the
+    instant ISO's live session has NO ssh, but the INSTALLED system must bring sshd up at boot
+    (the hypervisor tool reaches the installed box over ssh). This is a DIFFERENT `--ssh` from the
+    COMPILER-level `--ssh=<PW>` (parse_ssh_flag), which governs the LIVE session + selects the sshd
+    ISO variant; the two just share the token spelling. `--ssh` is deliberately NOT in
+    INSTANT_SUBFLAGS -- it is not an operator-tuned identity override, it is a fixed property of
+    the instant medium (`azzioinstall --instant --ssh=admin`), so we append it here rather than
+    forward it from argv. `--ssh=admin` also makes `admin` the installed login's password when the
+    operator gave no --username-password (azzioinstall's own fallback), matching the instant
+    default. Guarded on any pre-existing `--ssh=` so a future explicit value would not be doubled."""
     args = ["--instant"]
     for name in INSTANT_SUBFLAGS:
         value = parse_instant_subflag(argv, name)
         if value is not None:
             args.append(f"{name}={value}")
+    if not any(a == "--ssh" or a.startswith("--ssh=") for a in args):
+        args.append("--ssh=admin")
     return args
 
 

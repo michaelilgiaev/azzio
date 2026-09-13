@@ -553,7 +553,22 @@ SUBSYSTEM=="power_supply", ENV{POWER_SUPPLY_TYPE}=="Mains", ACTION=="change", RU
 # folder / host pubkey is absent (e.g. booted without the hypervisor's shared dir).
 # The azzio command line interface exits non-zero in that case, but Type=oneshot + no other unit
 # depending on it means the system carries on; the user can re-run it by hand.
-SSHD_HYPERVISOR_SETUP_SERVICE = """\
+#
+# LOGIN is a parameter (not hardcoded `main`) so the SAME unit body works for a system
+# installed under a DIFFERENT username: `azzioinstall --instant --ssh=<pw> --username=hypervisor`
+# enables ssh on the INSTALLED box for whatever login was chosen, and the scripted installer
+# writes this unit into the target chroot with SUDO_USER set to that login (see
+# installer_identity.identity_chroot_sh). The live sshd/instant+sshd ISO variants keep the
+# `main` default (the live medium's autologin user is always `main`).
+def sshd_hypervisor_setup_service(login: str = "main") -> str:
+    """The sshd-hypervisor auto-setup unit, parameterized by the LOGIN it stages the key for.
+
+    `azzio --sshd-hypervisor` resolves its target user from ${SUDO_USER:-$(id -un)} and refuses
+    a bare-root target, so the unit runs as root with Environment=SUDO_USER=<login> to make it
+    stage the pubkey into /home/<login>/.ssh (the account sshd accepts) and bring sshd up for
+    that account. `main` is the default (the live-ISO autologin user); the installer passes the
+    chosen login when ssh is enabled on an installed system under a renamed account."""
+    return f"""\
 [Unit]
 Description=Azzio sshd-hypervisor auto-setup (install host pubkey + start sshd)
 After=pkgs-setup.service
@@ -562,7 +577,7 @@ ConditionPathExists=/usr/local/bin/azzio
 
 [Service]
 Type=oneshot
-Environment=SUDO_USER=main
+Environment=SUDO_USER={login}
 ExecStart=/usr/local/bin/azzio --sshd-hypervisor
 RemainAfterExit=true
 StandardOutput=journal
@@ -571,6 +586,12 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 """
+
+
+# The live-ISO sshd/instant+sshd variant unit: SUDO_USER=main (the medium's autologin user).
+# Kept as a module constant because compiler._apply_variant and several tests reference it by
+# name; it is exactly sshd_hypervisor_setup_service("main").
+SSHD_HYPERVISOR_SETUP_SERVICE = sshd_hypervisor_setup_service("main")
 
 # The virtiofs shared-folder auto-mount, baked into EVERY variant (headed + ssh).
 # This is the fix for the old --shared/--ssh coupling: the share used to appear only

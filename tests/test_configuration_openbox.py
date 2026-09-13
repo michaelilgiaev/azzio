@@ -200,8 +200,12 @@ def test_install_wrapper_auto_is_fully_unattended_with_fixed_defaults():
     assert "export AZ_INSTALL_FULLNAME=" in w             # blank -> skipped (never prompted)
     assert 'export AZ_INSTALL_TIMEZONE="${az_opt_timezone:-Asia/Jerusalem}"' in w
     assert "export AZ_INSTALL_FILESYSTEM=btrfs" in w      # parity with the Calamares GUI
-    # Real passwords, defaulting to admin; NO star/casper knob under --instant anymore.
-    assert 'export AZ_INSTALL_PASSWORD="${az_opt_user_password:-admin}"' in w
+    # Real passwords, defaulting to admin; NO star/casper knob under --instant anymore. The
+    # default now layers the installed-system --ssh password in as a middle fallback
+    # (${az_opt_user_password:-${az_opt_ssh:-admin}}): an explicit --username-password still wins,
+    # else the --ssh password (so `--ssh=admin` alone yields a working account), else plain admin.
+    # A bare --instant sets neither, so it still resolves to admin -- the default is unchanged.
+    assert 'export AZ_INSTALL_PASSWORD="${az_opt_user_password:-${az_opt_ssh:-admin}}"' in w
     assert "export AZ_INSTALL_STAR_PASSWORD=1" not in w
     # run_auto funnels into the single install path.
     assert "run_cli" in w
@@ -264,7 +268,7 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
         'HOST=${AZ_INSTALL_HOSTNAME-} USER=${AZ_INSTALL_USERNAME-} '
         'FULL=[${AZ_INSTALL_FULLNAME-}] TZ=${AZ_INSTALL_TIMEZONE-} FS=${AZ_INSTALL_FILESYSTEM-} '
         'PW=${AZ_INSTALL_PASSWORD-} ROOTPW=${AZ_INSTALL_ROOT_PASSWORD-} '
-        'FINAL=${AZ_INSTALL_FINAL-} '
+        'FINAL=${AZ_INSTALL_FINAL-} SSH=${AZ_INSTALL_SSH-} '
         'STAR=${AZ_INSTALL_STAR_PASSWORD-}"; exit 0; }\n    exec true \\',
         1,
     ).replace("if ! sudo test -r", "if ! true && ! sudo test -r")
@@ -334,6 +338,35 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
     r = run(["--cli", "--disk", "sdb"])
     assert r.returncode == 0, r.stderr
     assert f(r.stdout, "CHOICE") == "2" and f(r.stdout, "DISK") == "sdb"
+
+    # --ssh=<pw> (ssh on the INSTALLED system). At the azzioinstall wrapper layer a bare --instant
+    # carries NO ssh sub-flag (the compiler injects --ssh=admin into the instant ISO's baked hook;
+    # this wrapper only sees what it is given), so SSH is empty by default here.
+    r = run(["--instant"])
+    assert f(r.stdout, "SSH") == "", r.stdout
+
+    # --instant --ssh=admin: sshd on the installed box, and (no --username-password) the ssh
+    # password becomes the login password too -> PW=admin, SSH=admin.
+    r = run(["--instant", "--ssh=admin"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "PW") == "admin" and f(r.stdout, "SSH") == "admin", r.stdout
+    assert f(r.stdout, "ROOTPW") == "admin", r.stdout   # shared by default -> root == user
+
+    # explicit --username-password WINS over the ssh password for the account, but --ssh still
+    # enables installed-system ssh -> PW=other, SSH=secret.
+    r = run(["--instant", "--ssh=secret", "--username-password=other"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "PW") == "other" and f(r.stdout, "SSH") == "secret", r.stdout
+
+    # --ssh works with --cli too (reaches run_cli directly, not via run_auto): forwarded, rc 0.
+    r = run(["--cli", "--ssh=x"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "SSH") == "x", r.stdout
+
+    # --ssh WITHOUT --instant or --cli (bare invocation) is rejected: it only means something for
+    # an install mode.
+    r = run(["--ssh=x"])
+    assert r.returncode == 2 and "requires --instant or --cli" in r.stderr, (r.returncode, r.stderr)
 
     # missing value errors.
     r = run(["--instant", "--hostname"])
