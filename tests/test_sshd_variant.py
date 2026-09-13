@@ -38,15 +38,18 @@ import pytest
 import compiler
 import profile
 import system
+from packages import openbox
 
 
 # --- VARIANTS is the canonical MAX set; the sshd ISO is OPT-IN ----------------
 
-def test_variants_are_base_and_sshd():
-    # VARIANTS is the canonical MAXIMUM set a build can produce. It sizes the progress
-    # bar's two mkarchiso weights. Which single variant ACTUALLY builds is decided at
-    # runtime by _variants_for(): base without --ssh, sshd (individually) with it (below).
-    assert compiler.VARIANTS == ("base", "sshd")
+def test_variants_include_base_and_sshd():
+    # VARIANTS is the canonical MAXIMUM set a build can produce. Which single variant ACTUALLY
+    # builds is decided at runtime by _variants_for(): base without --ssh, sshd (individually)
+    # with it (below). The set also carries the instant / instant+sshd variants (see
+    # test_instant_variant.py), but base and sshd must always be present.
+    assert compiler.VARIANTS == ("base", "sshd", "instant", "instant+sshd")
+    assert "base" in compiler.VARIANTS and "sshd" in compiler.VARIANTS
 
 
 # --- Method A: the --ssh=<PASSWORD> build-time flag --------------------------
@@ -569,3 +572,494 @@ def test_iso_selection_glob_distinguishes_base_from_sshd():
     import inspect
     src = inspect.getsource(compiler._run_mkarchiso)
     assert '{iso_name}-[0-9]*.iso' in src
+
+
+# =============================================================================
+# The `instant` build variant: the opt-in AUTO-INSTALLING ISO (azzio-headed-instant),
+# and its combination with --ssh (azzio-headed-instant-ssh -- "instant" BEFORE "ssh").
+#
+# These live here, beside the sshd-variant tests, because they exercise the SAME variant/
+# flag machinery (VARIANTS, _variants_for, _apply_variant, profile.iso_name_for) one product
+# tier over: `--instant` makes the built medium's LIVE SESSION auto-run `azzioinstall
+# --instant <sub-flags>` at boot -- the fully-scripted installer, already implemented in
+# packages/openbox -- instead of opening the Calamares GUI. Unlike --ssh, --instant carries
+# NO value (its presence is the opt-in) and a bare `--instant` is VALID. It STACKS with --ssh,
+# except the identity sub-flags that set the login user / root credential are rejected then
+# (the --ssh password already governs those). Checked as pure data/emit (no mkarchiso).
+# =============================================================================
+
+
+# --- VARIANTS carries the instant variants -----------------------------------
+
+def test_variants_include_instant_and_combined():
+    # The canonical MAX set gains the two instant variants alongside base/sshd. Only one is ever
+    # selected per run (_variants_for), but all four size the progress bar's mkarchiso weights.
+    assert compiler.VARIANTS == ("base", "sshd", "instant", "instant+sshd")
+
+
+# --- --instant is a BOOLEAN opt-in (no value; presence == build instant ISO) --
+
+def test_instant_flag_present_detects_forms():
+    # Any `--instant` / `--instant=...` token counts (--instant carries no value, so even a
+    # stray `--instant=x` still means "build the instant ISO").
+    assert compiler.instant_flag_present(["--instant"]) is True
+    assert compiler.instant_flag_present(["--instant=1"]) is True
+    assert compiler.instant_flag_present(["--full-compile", "--instant"]) is True
+
+
+def test_instant_flag_absent_is_not_present():
+    assert compiler.instant_flag_present([]) is False
+    assert compiler.instant_flag_present(["--full-compile"]) is False
+    assert compiler.instant_flag_present(["--instantfoo"]) is False  # near-miss is NOT the flag
+
+
+# --- sub-flag parsing (mirrors azzioinstall's own --instant options) ----------
+
+def test_parse_instant_subflag_absent_is_none():
+    assert compiler.parse_instant_subflag(["--instant"], "--username") is None
+    assert compiler.parse_instant_subflag([], "--hostname") is None
+
+
+def test_parse_instant_subflag_returns_value():
+    argv = ["--instant", "--username=alice", "--hostname=box"]
+    assert compiler.parse_instant_subflag(argv, "--username") == "alice"
+    assert compiler.parse_instant_subflag(argv, "--hostname") == "box"
+
+
+def test_parse_instant_subflag_empty_value_is_empty_string_not_none():
+    # An EXPLICIT blank (`--username=`) must be distinguishable from "not given" so
+    # check_instant_flag can reject it. Empty string, not None.
+    assert compiler.parse_instant_subflag(["--instant", "--username="], "--username") == ""
+
+
+def test_parse_instant_subflag_preserves_equals_in_value():
+    # split on the FIRST '=' only -- a password may itself contain '='.
+    assert compiler.parse_instant_subflag(
+        ["--instant", "--username-password=a=b=c"], "--username-password") == "a=b=c"
+
+
+def test_instant_subflags_present_lists_in_canonical_order():
+    # Reported in INSTANT_SUBFLAGS order regardless of argv order.
+    argv = ["--instant", "--final=idle", "--username=me", "--disk=sda"]
+    assert compiler.instant_subflags_present(argv) == ["--disk", "--username", "--final"]
+
+
+def test_all_azzioinstall_instant_subflags_are_mirrored():
+    # Every --instant option azzioinstall accepts must be forwardable by the compiler, else an
+    # operator could not reach it at build time. Pins the 1:1 mirror.
+    assert set(compiler.INSTANT_SUBFLAGS) == {
+        "--disk", "--hostname", "--username", "--username-password",
+        "--share-username-root-password", "--root-password", "--timezone", "--final",
+    }
+
+
+# --- resolving the azzioinstall command line ---------------------------------
+
+def test_instant_azzioinstall_args_bare():
+    assert compiler.instant_azzioinstall_args(["--instant"]) == ["--instant"]
+
+
+def test_instant_azzioinstall_args_forwards_present_subflags_in_order():
+    argv = ["--instant", "--final=reboot", "--username=me", "--hostname=box"]
+    assert compiler.instant_azzioinstall_args(argv) == [
+        "--instant", "--hostname=box", "--username=me", "--final=reboot",
+    ]
+
+
+def test_instant_azzioinstall_args_omits_absent_subflags():
+    args = compiler.instant_azzioinstall_args(["--instant", "--username=me"])
+    assert args == ["--instant", "--username=me"]
+    assert not any(a.startswith("--hostname") for a in args)
+
+
+def test_instant_azzioinstall_args_drops_non_subflags():
+    # --ssh / --full-compile are NOT azzioinstall sub-flags and must not leak into the command.
+    args = compiler.instant_azzioinstall_args(
+        ["--instant", "--ssh=pw", "--full-compile", "--hostname=box"])
+    assert args == ["--instant", "--hostname=box"]
+
+
+# --- check_instant_flag: validation matrix -----------------------------------
+
+def test_check_instant_absent_is_none():
+    assert compiler.check_instant_flag([]) is None
+    assert compiler.check_instant_flag(["--full-compile"]) is None
+
+
+def test_check_instant_bare_is_ok():
+    # Unlike --ssh, a bare --instant is VALID (defaults apply). No error.
+    assert compiler.check_instant_flag(["--instant"]) is None
+
+
+def test_check_instant_valid_subflags_ok():
+    assert compiler.check_instant_flag(
+        ["--instant", "--username=me", "--hostname=box", "--final=reboot"]) is None
+
+
+def test_check_instant_subflag_without_instant_is_error():
+    # A sub-flag with no --instant would silently do nothing -> hard error naming the flag.
+    msg = compiler.check_instant_flag(["--username=me"])
+    assert msg
+    assert "--instant" in msg
+    assert "--username" in msg
+
+
+def test_check_instant_blank_subflag_value_is_error():
+    for name in ("--username", "--hostname", "--timezone", "--disk"):
+        msg = compiler.check_instant_flag(["--instant", f"{name}="])
+        assert msg, f"blank {name} must error"
+        assert name in msg
+
+
+@pytest.mark.parametrize("bad", ["restrat", "reboot-now", "", "off"])
+def test_check_instant_bad_final_is_error(bad):
+    msg = compiler.check_instant_flag(["--instant", f"--final={bad}"])
+    assert msg, f"--final={bad!r} must error"
+    assert "--final" in msg
+
+
+@pytest.mark.parametrize("good", ["idle", "reboot", "restart", "shutdown"])
+def test_check_instant_good_final_ok(good):
+    assert compiler.check_instant_flag(["--instant", f"--final={good}"]) is None
+
+
+# --- the ONE cross-flag restriction: --ssh forbids username / root password ---
+
+@pytest.mark.parametrize("clashing", [
+    "--username=alice",
+    "--root-password=secret",
+    "--share-username-root-password=False",
+])
+def test_check_instant_ssh_plus_identity_is_hard_error(clashing):
+    # With --ssh, the medium's login user / root credential come from the --ssh password, so
+    # re-setting them via --instant is contradictory -> hard error (the spec's rule).
+    msg = compiler.check_instant_flag(["--instant", "--ssh=pw", clashing])
+    assert msg, f"--ssh + {clashing} must be a hard error"
+    assert "--ssh" in msg
+    assert clashing.split("=")[0] in msg   # names the offending flag
+
+
+@pytest.mark.parametrize("allowed", [
+    "--username-password=secret",   # the user's PASSWORD is allowed (only USERNAME is forbidden)
+    "--hostname=box",
+    "--timezone=Europe/London",
+    "--disk=sda",
+    "--final=reboot",
+])
+def test_check_instant_ssh_plus_nonidentity_is_ok(allowed):
+    assert compiler.check_instant_flag(["--instant", "--ssh=pw", allowed]) is None
+
+
+def test_check_instant_ssh_plus_bare_instant_ok():
+    # --instant + --ssh with no identity overrides is a valid combo (azzio-headed-instant-ssh).
+    assert compiler.check_instant_flag(["--instant", "--ssh=pw"]) is None
+
+
+def test_identity_conflict_set_is_exactly_username_and_root_password():
+    # Pin the spec's "username and root password" mapping: --username, --root-password, and the
+    # share toggle (its mechanism). --username-password is deliberately NOT in the set.
+    assert set(compiler.INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH) == {
+        "--username", "--root-password", "--share-username-root-password",
+    }
+    assert "--username-password" not in compiler.INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH
+
+
+# --- _variants_for: instant selects the right single variant ------------------
+
+def test_variants_for_instant_only():
+    assert compiler._variants_for(None, instant=True) == ("instant",)
+
+
+def test_variants_for_instant_plus_ssh_is_combined():
+    assert compiler._variants_for("$6$salt$digest", instant=True) == ("instant+sshd",)
+
+
+def test_variants_for_ssh_only_unchanged_by_instant_kwarg():
+    assert compiler._variants_for("$6$salt$digest", instant=False) == ("sshd",)
+
+
+def test_variants_for_base_when_neither():
+    assert compiler._variants_for(None, instant=False) == ("base",)
+    assert compiler._variants_for(None) == ("base",)  # default instant kwarg is False
+
+
+def test_variant_predicates():
+    assert compiler._variant_is_instant("instant") is True
+    assert compiler._variant_is_instant("instant+sshd") is True
+    assert compiler._variant_is_instant("base") is False
+    assert compiler._variant_is_instant("sshd") is False
+    assert compiler._variant_is_sshd("sshd") is True
+    assert compiler._variant_is_sshd("instant+sshd") is True
+    assert compiler._variant_is_sshd("base") is False
+    assert compiler._variant_is_sshd("instant") is False
+
+
+# --- ISO NAMING: instant appears, and appears BEFORE ssh ----------------------
+
+def test_iso_name_for_maps_instant_variants():
+    assert profile.iso_name_for("instant") == "azzio-headed-instant"
+    assert profile.iso_name_for("instant+sshd") == "azzio-headed-instant-ssh"
+
+
+def test_instant_appears_before_ssh_in_combined_name():
+    # The spec: "instant" must come BEFORE "ssh" -- azzio-headed-instant-ssh, NEVER
+    # azzio-headed-ssh-instant.
+    name = profile.iso_name_for("instant+sshd")
+    assert name == "azzio-headed-instant-ssh"
+    assert name.index("instant") < name.index("ssh")
+    assert "ssh-instant" not in name
+
+
+def test_profiledef_instant_iso_names():
+    assert _iso_name(profile.profiledef_sh("instant")) == "azzio-headed-instant"
+    assert _iso_name(profile.profiledef_sh("instant+sshd")) == "azzio-headed-instant-ssh"
+
+
+def test_only_iso_name_differs_for_instant_variant():
+    # The instant profiledef is byte-identical to base EXCEPT its iso_name -- the auto-install
+    # difference lives in the airootfs hook (_apply_variant), not in profiledef.
+    base = profile.profiledef_sh("base")
+    inst = profile.profiledef_sh("instant")
+    norm = inst.replace('iso_name="azzio-headed-instant"', 'iso_name="azzio-headed"')
+    assert norm == base
+
+
+def test_instant_variant_globs_are_disjoint():
+    # The output-separation glob "{iso_name}-[0-9]*.iso" must keep the variants apart: the char
+    # right after each shorter name is a LETTER (not a digit), so no glob matches a longer name.
+    import fnmatch
+    all_names = [
+        "azzio-headed-2026.07.31-x86_64.iso",
+        "azzio-headed-ssh-2026.07.31-x86_64.iso",
+        "azzio-headed-instant-2026.07.31-x86_64.iso",
+        "azzio-headed-instant-ssh-2026.07.31-x86_64.iso",
+    ]
+    def hits(iso_name):
+        return [f for f in all_names if fnmatch.fnmatch(f, f"{iso_name}-[0-9]*.iso")]
+    assert hits("azzio-headed") == ["azzio-headed-2026.07.31-x86_64.iso"]
+    assert hits("azzio-headed-instant") == ["azzio-headed-instant-2026.07.31-x86_64.iso"]
+    assert hits("azzio-headed-instant-ssh") == ["azzio-headed-instant-ssh-2026.07.31-x86_64.iso"]
+
+
+# --- the auto-install HOOK builder (openbox) ----------------------------------
+
+def test_hook_execs_azzioinstall_with_args():
+    hook = openbox.instant_install_hook_sh(["--instant", "--username=me"])
+    assert hook.startswith("#!/bin/sh")
+    assert f"exec '{openbox.INSTALL_WRAPPER_PATH}'" in hook
+    assert "--instant" in hook and "--username=me" in hook
+
+
+def test_hook_shell_quotes_values_with_spaces():
+    # A password with a space must reach azzioinstall as ONE argv word -- the builder shell-quotes
+    # each arg (shlex.quote), so `correct horse` is single-quoted, not split.
+    hook = openbox.instant_install_hook_sh(["--instant", "--username-password=correct horse"])
+    assert "'--username-password=correct horse'" in hook
+    exec_lines = [l for l in hook.splitlines() if l.startswith("exec ")]
+    assert len(exec_lines) == 1   # single exec line, no newline injection
+
+
+def test_hook_quotes_shell_metacharacters():
+    hook = openbox.instant_install_hook_sh(["--instant", "--username-password=a;rm -rf /"])
+    # shlex.quote wraps the whole a;rm... in single quotes -> inert.
+    assert "'--username-password=a;rm -rf /'" in hook
+    assert "; rm -rf /" not in hook.replace("'--username-password=a;rm -rf /'", "")
+
+
+# --- the LIVE autostart wires the hook (and falls back to the GUI) ------------
+
+def test_live_autostart_prefers_hook_then_gui():
+    a = openbox.openbox_autostart()
+    assert openbox.INSTANT_INSTALL_HOOK_PATH in a
+    # The hook is tested in an `if` that gates the `elif ... --gui` fallback, so on an instant ISO
+    # (hook present) the GUI never runs. Assert the CONTROL FLOW, not raw substring order (the
+    # header comment mentions --gui too): the `if [ -x '<hook>' ]` guard must precede the
+    # `elif [ -x '<wrapper>' ]` ... `--gui` runner line.
+    if_line = next(l for l in a.splitlines()
+                   if l.lstrip().startswith("if [ -x") and openbox.INSTANT_INSTALL_HOOK_PATH in l)
+    gui_run_line = next(l for l in a.splitlines() if "--gui" in l and "sleep 2" in l)
+    elif_line = next(l for l in a.splitlines() if l.lstrip().startswith("elif [ -x"))
+    assert a.index(if_line) < a.index(elif_line) < a.index(gui_run_line)
+    assert "sleep 2" in a   # both launches are still guarded/backgrounded
+
+
+def test_installed_autostart_has_neither_hook_nor_installer():
+    # The INSTALLED system must never auto-install or re-open the installer.
+    inst = openbox.openbox_autostart_installed()
+    assert openbox.INSTANT_INSTALL_HOOK_PATH not in inst
+    assert "azzioinstall" not in inst
+    assert "--gui" not in inst
+
+
+# --- _apply_variant: the per-variant airootfs overlay (reuses _iso_name /
+#     _svc_dest / _link_dest defined above for the sshd tests) ----------------
+
+def _hook_dest(airootfs):
+    return airootfs / openbox.INSTANT_INSTALL_HOOK_PATH.lstrip("/")
+
+
+def _instant_tree(tmp_path):
+    W = tmp_path / "profile"
+    airootfs = W / "airootfs"
+    airootfs.mkdir(parents=True)
+    return W, airootfs
+
+
+def _main_shadow_field(airootfs):
+    shadow = (airootfs / "etc/shadow").read_text()
+    return next(l.split(":")[1] for l in shadow.splitlines() if l.startswith("main:"))
+
+
+def test_apply_variant_instant_plants_executable_hook(tmp_path):
+    W, airootfs = _instant_tree(tmp_path)
+    compiler._apply_variant(W, airootfs, "instant",
+                            instant_azzioinstall_args=["--instant", "--username=me"])
+    hook = _hook_dest(airootfs)
+    assert hook.is_file()
+    assert os.access(hook, os.X_OK), "the hook must be executable (the autostart runs it)"
+    body = hook.read_text()
+    assert "azzioinstall" in body and "--username=me" in body
+    # instant-only ISO: NO sshd service/link, shadow stays LOCKED, name is azzio-headed-instant.
+    assert not _svc_dest(airootfs).exists()
+    assert not _link_dest(airootfs).is_symlink()
+    assert _main_shadow_field(airootfs) in ("!", "*")
+    assert _iso_name((W / "profiledef.sh").read_text()) == "azzio-headed-instant"
+
+
+def test_apply_variant_instant_plus_sshd_has_both(tmp_path):
+    W, airootfs = _instant_tree(tmp_path)
+    fake_hash = "$6$salt$" + "x" * 80
+    compiler._apply_variant(W, airootfs, "instant+sshd",
+                            ssh_password_hash=fake_hash,
+                            instant_azzioinstall_args=["--instant", "--hostname=box"])
+    assert _hook_dest(airootfs).is_file()          # instant hook present...
+    assert _svc_dest(airootfs).is_file()           # ...AND the sshd service + link + hashed shadow.
+    assert _link_dest(airootfs).is_symlink()
+    assert _main_shadow_field(airootfs) == fake_hash
+    assert _iso_name((W / "profiledef.sh").read_text()) == "azzio-headed-instant-ssh"
+
+
+def test_apply_variant_base_has_no_hook(tmp_path):
+    W, airootfs = _instant_tree(tmp_path)
+    compiler._apply_variant(W, airootfs, "base")
+    assert not _hook_dest(airootfs).exists()
+
+
+def test_apply_variant_sshd_has_no_hook(tmp_path):
+    W, airootfs = _instant_tree(tmp_path)
+    compiler._apply_variant(W, airootfs, "sshd", ssh_password_hash="$6$s$" + "y" * 80)
+    assert not _hook_dest(airootfs).exists()
+    assert _svc_dest(airootfs).is_file()   # sshd still gets its service
+
+
+def test_apply_variant_removes_stale_hook_from_prior_instant_pass(tmp_path):
+    # The airootfs is shared across passes; a base/sshd pass after an instant pass MUST strip the
+    # hook, else the base/sshd ISO would silently auto-install.
+    W, airootfs = _instant_tree(tmp_path)
+    compiler._apply_variant(W, airootfs, "instant", instant_azzioinstall_args=["--instant"])
+    assert _hook_dest(airootfs).is_file()
+    compiler._apply_variant(W, airootfs, "base")
+    assert not _hook_dest(airootfs).exists()
+
+
+def test_apply_variant_instant_without_args_raises(tmp_path):
+    # Refuse to build an instant ISO with no hook -- it would boot to the GUI, silently ignoring
+    # --instant.
+    W, airootfs = _instant_tree(tmp_path)
+    with pytest.raises(ValueError):
+        compiler._apply_variant(W, airootfs, "instant", instant_azzioinstall_args=None)
+
+
+def test_apply_variant_instant_plus_sshd_without_hash_raises(tmp_path):
+    W, airootfs = _instant_tree(tmp_path)
+    with pytest.raises(ValueError):
+        compiler._apply_variant(W, airootfs, "instant+sshd",
+                                instant_azzioinstall_args=["--instant"])
+
+
+# --- main(): end-to-end guards + wiring --------------------------------------
+
+def test_main_exits_nonzero_on_subflag_without_instant(monkeypatch, capsys):
+    # An --instant sub-flag without --instant aborts BEFORE any build work.
+    monkeypatch.setattr(sys, "argv", ["compiler", "--username=me"])
+
+    def _boom(*a, **k):
+        raise AssertionError("run() must NOT be reached on an invalid --instant combination")
+
+    monkeypatch.setattr(compiler, "run", _boom)
+    rc = compiler.main()
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "--instant" in err and "--username" in err
+
+
+def test_main_exits_nonzero_on_ssh_plus_username(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["compiler", "--instant", "--ssh=pw", "--username=alice"])
+
+    def _boom(*a, **k):
+        raise AssertionError("run() must NOT be reached when --ssh clashes with --username")
+
+    monkeypatch.setattr(compiler, "run", _boom)
+    rc = compiler.main()
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert "--ssh" in err and "--username" in err
+
+
+def test_main_exits_nonzero_on_bad_final(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["compiler", "--instant", "--final=nope"])
+    monkeypatch.setattr(compiler, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("unreached")))
+    rc = compiler.main()
+    assert rc != 0
+    assert "--final" in capsys.readouterr().err
+
+
+def test_main_threads_instant_args_into_run(monkeypatch):
+    # A VALID --instant run must reach run() with instant_azzioinstall_args resolved from the
+    # sub-flags. Stub everything heavy and capture the kwargs run() receives.
+    monkeypatch.setattr(sys, "argv",
+                        ["compiler", "--instant", "--username=me", "--final=reboot"])
+    captured = {}
+
+    def _fake_run(*a, **k):
+        captured.update(k)
+        return []   # no ISOs; main() reports "0 ISOs" and returns 0
+
+    monkeypatch.setattr(compiler, "run", _fake_run)
+    monkeypatch.setattr(compiler.logstream, "install", lambda *a, **k: None)
+    monkeypatch.setattr(compiler, "cache_is_complete", lambda: True)
+    monkeypatch.setattr(compiler, "_stale_cache_notice", lambda *a, **k: None)
+    monkeypatch.setattr(compiler.makepkg, "set_use_each_cpu", lambda *a, **k: None)
+    monkeypatch.setattr(compiler.makepkg, "build_jobs", lambda: 4)
+    monkeypatch.setattr(compiler.makepkg, "_cpu_count", lambda: 8)
+
+    class _Bar:
+        subfrac = 0
+        total_steps = 18
+        def __init__(self, *a, **k): pass
+        def init(self): pass
+        def finalize(self): pass
+        def cleanup(self): pass
+    monkeypatch.setattr(compiler, "ProgressBar", _Bar)
+
+    class _Own:
+        def __init__(self, *a, **k): pass
+        def reclaim_full(self): pass
+        def start_continuous(self): pass
+        def stop_continuous(self): pass
+    monkeypatch.setattr(compiler, "Ownership", _Own)
+
+    class _Keep:
+        def __init__(self, *a, **k): pass
+        def start(self): pass
+        def stop(self): pass
+    monkeypatch.setattr(compiler, "SudoKeepalive", _Keep)
+    monkeypatch.setattr(compiler, "_sudo", lambda: [])
+    monkeypatch.setattr(compiler.signal, "signal", lambda *a, **k: None)
+
+    rc = compiler.main()
+    assert rc == 0
+    assert captured.get("instant_azzioinstall_args") == [
+        "--instant", "--username=me", "--final=reboot"]
+    assert captured.get("ssh_password_hash") is None   # ssh not supplied -> no hash threaded

@@ -409,10 +409,14 @@ def test_step_weights_leading_zero():
     assert compiler.STEP_WEIGHTS[0] == 0
 
 
-def test_step_weights_giants_are_last_four():
-    # package cache, makepkg, and the TWO mkarchiso passes (one per POSSIBLE ISO variant)
-    # -- the four heavy tail weights. The bar is sized for the max; one variant per run.
-    assert compiler.STEP_WEIGHTS[-4:] == [250, 120, 270, 270]
+def test_step_weights_giants_are_the_heavy_tail():
+    # The heavy tail: package cache (250), makepkg (120), then ONE mkarchiso pass (270) per
+    # POSSIBLE ISO variant. The bar is sized for the max variant set; one variant builds per run.
+    n_variants = len(compiler.VARIANTS)
+    assert compiler.STEP_WEIGHTS[13:15] == [250, 120]
+    assert compiler.STEP_WEIGHTS[15:] == [270] * n_variants
+    # The two non-270 giants plus at least one mkarchiso giant form the tail.
+    assert compiler.STEP_WEIGHTS[-(2 + n_variants):] == [250, 120] + [270] * n_variants
 
 
 def test_cache_complete_false_when_index_missing(monkeypatch, tmp_path):

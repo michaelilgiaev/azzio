@@ -90,26 +90,31 @@ import pacman
 import profile
 import system
 
+# The ISO variants a build CAN produce -- the canonical MAX set. Every step up to mkarchiso is
+# variant-independent (same packages, same airootfs), and every variant runs EXACTLY ONE
+# mkarchiso pass. WHICH ONE actually builds is decided at runtime by _variants_for():
+# the base `azzio-headed` medium by default, or -- INDIVIDUALLY, never alongside base -- the
+# `azzio-headed-ssh` medium (--ssh), the `azzio-headed-instant` medium (--instant), or the
+# combined `azzio-headed-instant-ssh` medium (--instant AND --ssh). profile.ISO_NAMES maps these
+# keys to the product-line artifact names. Defined BEFORE STEP_WEIGHTS, which sizes its trailing
+# mkarchiso weights from len(VARIANTS).
+VARIANTS = ("base", "sshd", "instant", "instant+sshd")
+
 # Weights: setup/emit steps carry real weight so the bar visibly advances through
 # them (at weight 1 they were ~2% of the whole bar and looked frozen); the giants
-# are still the bulk, sized from real log spans. Keep in sync with steps below:
-# len(STEP_WEIGHTS) - 1 MUST equal the number of bar.step() calls in run(). The
-# final FOUR weights belong, in order, to: the package-cache giant, the makepkg
-# stage (our own calamares/librewolf; heavy in the default tier, VERY heavy with
-# --full-compile), and the TWO mkarchiso giants -- one per POSSIBLE ISO variant.
-# Every run builds exactly ONE variant (base OR ssh -- see _variants_for), so only one
-# of those two mkarchiso passes runs; the bar is sized for the MAXIMUM of two and
-# finalize() snaps it to full after the single pass, so over-sizing is safe.
-STEP_WEIGHTS = [0] + [8] * 12 + [250, 120, 270, 270]
-
-# The ISO variants a build CAN produce -- the canonical MAX set that sizes STEP_WEIGHTS's
-# two mkarchiso weights. Every step up to mkarchiso is variant-independent (same packages,
-# same airootfs). WHICH ONE actually builds is decided at runtime by _variants_for(), and
-# it is always exactly one: the base `azzio-headed` medium WITHOUT --ssh, or the
-# `azzio-headed-ssh` medium (INDIVIDUALLY, not alongside base) WHEN --ssh="<PASSWORD>"
-# opts in (no default password is ever shipped). The variant KEYS stay base/sshd;
-# profile.ISO_NAMES maps them to the product-line artifact names.
-VARIANTS = ("base", "sshd")
+# are still the bulk, sized from real log spans. Keep in sync with steps below.
+# run() makes 15 LITERAL bar.step() calls, but the LAST lives inside the per-variant
+# finalize loop and executes once per selected variant, so the number of milestones
+# the bar counts is (15 - 1) + len(VARIANTS) = 14 + len(VARIANTS), and
+# len(STEP_WEIGHTS) - 1 MUST equal that (asserted in test_compiler / test_compiler_driver).
+# The tail weights are, in order: the package-cache giant (250), the makepkg stage (120;
+# our own calamares/librewolf, heavy in the default tier, VERY heavy with --full-compile),
+# and then ONE mkarchiso giant (270) PER POSSIBLE ISO variant -- len(VARIANTS) of them.
+# Every run builds exactly ONE variant (_variants_for), so only ONE of those mkarchiso
+# passes actually runs; the bar is sized for the MAXIMUM and finalize() snaps it to full
+# after the single pass, so over-sizing is safe. VARIANTS has four entries
+# (base/sshd/instant/instant+sshd), hence four trailing 270s.
+STEP_WEIGHTS = [0] + [8] * 12 + [250, 120] + [270] * len(VARIANTS)
 
 # PGID of the currently-running mkarchiso child (0 = none). mkarchiso is spawned in
 # its own session/process group so the signal handler can kill THAT group (and all
@@ -207,20 +212,196 @@ def ssh_password_hash(password: str) -> str:
     return out
 
 
-def _variants_for(ssh_hash: str | None) -> tuple[str, ...]:
-    """The ISO variants a build ACTUALLY produces this run -- exactly ONE.
+# --- Method A': the --instant opt-in for the auto-installing ISO -------------
+# A THIRD ISO type alongside base and sshd: the "instant" medium boots straight into an
+# UNATTENDED install -- its live session auto-runs `azzioinstall --instant <sub-flags>` (the
+# fully-scripted installer with every answer pre-seeded, already implemented in
+# packages/openbox) instead of opening the Calamares GUI. `--instant` is a BOOLEAN opt-in (its
+# mere presence selects the instant ISO); it does NOT demand a value the way `--ssh` demands a
+# password, because `azzioinstall --instant` on its own is already valid (it installs with
+# defaults: user `main`, password `admin`, btrfs, timezone Asia/Jerusalem). The operator TUNES
+# the baked-in install with the SAME sub-flags azzioinstall itself accepts, forwarded verbatim.
+#
+# --instant is STACKABLE with --ssh: `--instant --ssh="<PW>"` builds azzio-headed-INSTANT-ssh
+# (instant first in the name -- see profile.ISO_NAMES), an auto-installing medium that ALSO has
+# ssh enabled on the live session (so the unattended install can be watched/driven over SSH).
+# The ONE restriction (see check_instant_flag): when --ssh is passed, the `main` login user and
+# root credential of the medium are already governed by the --ssh password, so re-setting the
+# INSTALLED system's username / root password via --instant is contradictory and is a HARD ERROR.
 
-    --ssh outputs the SSH-type medium INDIVIDUALLY: when an --ssh password (already
-    hashed) is supplied, ONLY the `azzio-headed-ssh` ISO is built -- NOT the base ISO
-    alongside it. Without --ssh, ONLY the base `azzio-headed` ISO is built. So a plain
-    run and an --ssh run each produce a single, distinct medium; the base ISO is simply
-    what you get when you do not opt into ssh.
+# The --instant sub-flags, MIRRORING azzioinstall's own --instant options 1:1 (see
+# packages/openbox usage text). Each is forwarded to azzioinstall verbatim when present; an
+# omitted sub-flag keeps azzioinstall's built-in default (the single source of truth for
+# defaults). Order here is the order they are emitted onto the azzioinstall command line.
+INSTANT_SUBFLAGS = (
+    "--disk",
+    "--hostname",
+    "--username",
+    "--username-password",
+    "--share-username-root-password",
+    "--root-password",
+    "--timezone",
+    "--final",
+)
 
-    (VARIANTS stays the canonical MAX set of BOTH variants -- it sizes the progress bar's
-    two mkarchiso weights -- but only one of them is ever selected per run.)"""
+# The sub-flags that set the medium's LOGIN USER and ROOT credential. These are the ones the
+# spec forbids alongside --ssh (the --ssh password already IS that credential story: `main`
+# logs in with it, root stays locked). --username-password (the user's *password*, distinct
+# from *which* user and from *root's* password) is intentionally NOT here -- it stays allowed
+# with --ssh, so an instant+ssh medium can still choose the installed user's password.
+INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH = (
+    "--username",
+    "--share-username-root-password",
+    "--root-password",
+)
+
+# Accepted values for --final (what the box does once the unattended install finishes). Mirrors
+# azzioinstall's run_auto: idle (default), reboot/restart (alias), shutdown. Validated at build
+# time so a typo (`--final=restrat`) fails the COMPILE, not silently at first boot on the target.
+INSTANT_FINAL_VALUES = ("idle", "reboot", "restart", "shutdown")
+
+
+def instant_flag_present(argv: list[str]) -> bool:
+    """True if the operator wrote the `--instant` flag AT ALL (bare `--instant`, or the
+    `--instant=` / `--instant=anything` forms). Unlike --ssh, --instant carries no value, so any
+    `--instant...` token counts as "build the instant ISO". A token like `--instantfoo` is NOT
+    the flag (must be exactly `--instant` or start with `--instant=`)."""
+    return any(t == "--instant" or t.startswith("--instant=") for t in argv)
+
+
+def parse_instant_subflag(argv: list[str], name: str) -> str | None:
+    """Pull the value of an --instant sub-flag (`--<name>=<value>`) out of argv, or None if the
+    sub-flag is absent. `name` is the full flag INCLUDING its leading dashes (e.g. "--username").
+    Split on the FIRST '=' only so a value may itself contain '=' (a password like `a=b`). An
+    explicitly-empty value (`--username=`) returns "" (not None) so callers can tell "given
+    blank" from "not given" -- check_instant_flag rejects a blank where azzioinstall needs
+    content."""
+    prefix = name + "="
+    for token in argv:
+        if token.startswith(prefix):
+            return token.split("=", 1)[1]
+    return None
+
+
+def instant_subflags_present(argv: list[str]) -> list[str]:
+    """The list of --instant sub-flags actually present in argv (each as its full `--name`), in
+    the canonical INSTANT_SUBFLAGS order. Used both to build the azzioinstall command line and to
+    detect a sub-flag passed WITHOUT --instant (a mistake -- see check_instant_flag)."""
+    return [name for name in INSTANT_SUBFLAGS if parse_instant_subflag(argv, name) is not None]
+
+
+def instant_azzioinstall_args(argv: list[str]) -> list[str]:
+    """Build the exact `azzioinstall` argument list the instant ISO's boot hook will run:
+    `--instant` followed by every sub-flag the operator supplied, forwarded VERBATIM as
+    `--name=value` (so azzioinstall re-parses them with its own logic/defaults). Sub-flags the
+    operator omitted are simply left out, so azzioinstall applies its built-in default for each.
+    Assumes check_instant_flag has already passed (valid combination)."""
+    args = ["--instant"]
+    for name in INSTANT_SUBFLAGS:
+        value = parse_instant_subflag(argv, name)
+        if value is not None:
+            args.append(f"{name}={value}")
+    return args
+
+
+def check_instant_flag(argv: list[str]) -> str | None:
+    """Validate the --instant flag combination, returning an ERROR MESSAGE to abort on, or None
+    to proceed. Pure (argv in, message out) so main() can print+exit and tests can assert it.
+
+    Rules:
+      1. An --instant sub-flag (--username/--hostname/...) given WITHOUT --instant is a hard
+         error -- it would silently do nothing (mirrors azzioinstall's own gate; a silent no-op
+         would build an ISO with defaults the operator thought they had overridden).
+      2. With --ssh present, the identity sub-flags that set the login user / root credential
+         (INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH) are a hard error: the --ssh password
+         already governs that credential, so setting it again via --instant is contradictory.
+      3. --final, if given, must be one of INSTANT_FINAL_VALUES (a typo must fail the compile).
+      4. A sub-flag azzioinstall needs non-empty (everything except... all of them, really) must
+         not be blank: `--username=` etc. is a hard error (an empty override is never intended).
+    """
+    present = instant_subflags_present(argv)
+
+    # Rule 1: sub-flags require --instant.
+    if present and not instant_flag_present(argv):
+        joined = " ".join(present)
+        return (
+            f"these options require --instant:{''.join(' ' + p for p in present)}. "
+            f"They tune the unattended install the instant ISO runs, so they only mean "
+            f"something when --instant selects that ISO. Add --instant, or drop {joined}."
+        )
+
+    if not instant_flag_present(argv):
+        return None  # no instant ISO requested; nothing to validate.
+
+    # Rule 4: no blank sub-flag values.
+    for name in present:
+        if parse_instant_subflag(argv, name) == "":
+            return (
+                f'{name} was given an empty value ({name}=). Give it a real value '
+                f'(e.g. {name}=...), or omit it to keep the azzioinstall default.'
+            )
+
+    # Rule 2: --ssh forbids setting the installed username / root password via --instant.
+    if ssh_flag_present(argv):
+        clash = [n for n in INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH if n in present]
+        if clash:
+            joined = " ".join(clash)
+            return (
+                f"--ssh cannot be combined with{''.join(' ' + c for c in clash)}. "
+                f"The --ssh password already sets the medium's login user (main) and root "
+                f"credential, so setting the installed system's username / root password with "
+                f"--instant contradicts it. Drop {joined} (the instant+ssh ISO installs `main` "
+                f"with the ssh password), or drop --ssh to choose them freely with --instant."
+            )
+
+    # Rule 3: --final must be a known action.
+    final = parse_instant_subflag(argv, "--final")
+    if final is not None and final not in INSTANT_FINAL_VALUES:
+        return (
+            f"--final={final} is not a valid post-install action. Choose one of: "
+            f"{', '.join(INSTANT_FINAL_VALUES)}."
+        )
+
+    return None
+
+
+def _variants_for(ssh_hash: str | None, instant: bool = False) -> tuple[str, ...]:
+    """The ISO variant a build ACTUALLY produces this run -- exactly ONE.
+
+    Each opt-in swaps the base ISO for its own medium (never built ALONGSIDE the base):
+      * no flags            -> ("base",)          the normal azzio-headed live/install ISO
+      * --ssh only          -> ("sshd",)          azzio-headed-ssh
+      * --instant only      -> ("instant",)       azzio-headed-instant (auto-installs at boot)
+      * --instant AND --ssh -> ("instant+sshd",)  azzio-headed-instant-ssh (both behaviours)
+
+    --instant is a plain bool here (its presence, resolved in main()); --ssh arrives as its
+    already-hashed password (truthy when supplied). The single returned key drives
+    profile.iso_name_for and the per-variant overlay in _apply_variant.
+
+    (VARIANTS stays the canonical MAX set of ALL variants -- it sizes the progress bar's
+    mkarchiso weight -- but only one of them is ever selected per run.)"""
+    if instant and ssh_hash:
+        return ("instant+sshd",)
+    if instant:
+        return ("instant",)
     if ssh_hash:
         return ("sshd",)
     return ("base",)
+
+
+# Which per-variant behaviours each variant key turns on. Kept as small predicates so
+# _apply_variant (and its tests) branch on WHAT differs, not on a growing set of key equalities
+# -- the combined "instant+sshd" key needs BOTH the sshd behaviour AND the instant behaviour.
+def _variant_is_sshd(variant: str) -> bool:
+    """True for the variants that enable ssh + set `main`'s shadow from the --ssh password:
+    the standalone sshd ISO and the combined instant+sshd ISO."""
+    return variant in ("sshd", "instant+sshd")
+
+
+def _variant_is_instant(variant: str) -> bool:
+    """True for the variants whose live session auto-runs the unattended installer: the
+    standalone instant ISO and the combined instant+sshd ISO."""
+    return variant in ("instant", "instant+sshd")
 
 
 def kill_active_child(sudo: list[str]) -> None:
@@ -240,7 +421,8 @@ def kill_active_child(sudo: list[str]) -> None:
 
 
 def run(bar: ProgressBar, offline: bool, reclaim_after_mkarchiso,
-        full_compile: bool = False, ssh_password_hash: str | None = None) -> list[Path]:
+        full_compile: bool = False, ssh_password_hash: str | None = None,
+        instant_azzioinstall_args: list[str] | None = None) -> list[Path]:
     """Execute all steps; return the paths of the built ISOs. Raises on failure.
 
     full_compile: when True, Azzio's own packages (librewolf) are compiled from
@@ -248,17 +430,22 @@ def run(bar: ProgressBar, offline: bool, reclaim_after_mkarchiso,
     makepkg stage below.
 
     ssh_password_hash: the operator's --ssh password ALREADY HASHED (sha-512 crypt),
-    or None. It selects WHICH single ISO is built (DECISION 2: no default password is
-    ever shipped -- the sshd variant's credential comes from the operator at build time).
-    None -> ONLY the base/headed ISO. A hash -> ONLY the `azzio-headed-ssh` medium
-    (built INDIVIDUALLY, NOT alongside the base ISO), whose /etc/shadow carries that hash
-    for `main` and which auto-runs `azzio --sshd-hypervisor` at boot.
+    or None. Together with instant_azzioinstall_args it selects WHICH single ISO is built
+    (DECISION 2: no default password is ever shipped -- the sshd variant's credential comes
+    from the operator at build time). A hash makes the built medium enable ssh and carry that
+    hash for `main` in /etc/shadow (auto-running `azzio --sshd-hypervisor` at boot).
+
+    instant_azzioinstall_args: the resolved `azzioinstall --instant ...` argument list (from
+    instant_azzioinstall_args()), or None when --instant was not passed. Non-None makes the built
+    medium the auto-installing "instant" type -- its live session runs those exact azzioinstall
+    args at boot instead of opening the Calamares GUI. Combined with an ssh hash it yields the
+    azzio-headed-instant-ssh medium (both behaviours).
 
     Every step up to mkarchiso is variant-independent -- same packages, same shared
     airootfs -- so the shared, heavy work (package cache, own-package build) happens
     exactly once. The selected variant's differences (profiledef iso_name, the
-    sshd-hypervisor auto-setup service, and its /etc/shadow) plus its single mkarchiso
-    pass run in the finalize loop at the end.
+    sshd-hypervisor auto-setup service, its /etc/shadow, and the instant auto-install hook)
+    plus its single mkarchiso pass run in the finalize loop at the end.
     """
     W = paths.WORKDIR
     airootfs = W / "airootfs"
@@ -467,19 +654,20 @@ def run(bar: ProgressBar, offline: bool, reclaim_after_mkarchiso,
     _finalize_build_pacman_conf(W)
 
     # 14/15 -- Assemble the selected ISO variant (one GIANT mkarchiso pass, weight 270).
-    # Exactly ONE variant is selected per run: the base ISO WITHOUT --ssh, or the ssh ISO
-    # (INDIVIDUALLY) WHEN --ssh opted in (_variants_for). Every step above is variant-
-    # independent, so we overlay the selected variant's tiny differences (its profiledef
-    # iso_name, its /etc/shadow, and whether the sshd-hypervisor auto-setup service is
-    # emitted/enabled) onto the shared airootfs and run its single mkarchiso pass.
-    # mkarchiso re-copies the profile's airootfs overlay into its work tree at the start of
-    # the pass, so the shadow / sshd enable-symlink for the selected variant is correctly
-    # reflected in the ISO. (The loop is kept over _variants_for's result -- today one
-    # element -- so nothing breaks if a future run ever selects more than one.) The ISO
-    # lands in output/ with its distinct iso_name.
+    # Exactly ONE variant is selected per run: base (no opt-in), sshd (--ssh), instant
+    # (--instant), or instant+sshd (both) -- always INDIVIDUALLY (_variants_for). Every step
+    # above is variant-independent, so we overlay the selected variant's tiny differences (its
+    # profiledef iso_name, its /etc/shadow, whether the sshd-hypervisor auto-setup service is
+    # emitted/enabled, and whether the instant auto-install hook is planted) onto the shared
+    # airootfs and run its single mkarchiso pass. mkarchiso re-copies the profile's airootfs
+    # overlay into its work tree at the start of the pass, so those per-variant files are
+    # correctly reflected in the ISO. (The loop is kept over _variants_for's result -- today one
+    # element -- so nothing breaks if a future run ever selects more than one.) The ISO lands in
+    # output/ with its distinct iso_name.
     isos: list[Path] = []
-    for variant in _variants_for(ssh_password_hash):
-        _apply_variant(W, airootfs, variant, ssh_password_hash=ssh_password_hash)
+    for variant in _variants_for(ssh_password_hash, instant=instant_azzioinstall_args is not None):
+        _apply_variant(W, airootfs, variant, ssh_password_hash=ssh_password_hash,
+                       instant_azzioinstall_args=instant_azzioinstall_args)
         bar.step(f"Assemble {profile.iso_name_for(variant)} ISO (mkarchiso)")
         isos.append(_run_mkarchiso(sudo, W, bar, reclaim_after_mkarchiso,
                                    iso_name=profile.iso_name_for(variant)))
@@ -508,37 +696,46 @@ def _provision_sshd_hardening(airootfs: Path) -> None:
 
 
 def _apply_variant(W: Path, airootfs: Path, variant: str,
-                   ssh_password_hash: str | None = None) -> None:
-    """Overlay the per-variant differences onto the shared profile tree just before
-    its mkarchiso pass. Three things differ between the base and sshd ISOs:
+                   ssh_password_hash: str | None = None,
+                   instant_azzioinstall_args: list[str] | None = None) -> None:
+    """Overlay the per-variant differences onto the shared profile tree just before its
+    mkarchiso pass. FOUR things can differ across the base/sshd/instant/instant+sshd ISOs, and
+    the two opt-in behaviours (ssh, instant) apply INDEPENDENTLY -- the combined instant+sshd
+    medium gets BOTH -- so each is decided by its own predicate (_variant_is_sshd /
+    _variant_is_instant), not by a single key equality:
 
-      1. profiledef iso_name -- drives the artifact filename (azzio-headed-<ver>.iso vs
-         azzio-headed-ssh-<ver>.iso). Rewritten at the profile root every pass.
-      2. the sshd-hypervisor auto-setup service -- emitted AND enabled (a
-         multi-user.target.wants symlink) ONLY for the sshd variant, so that ISO
-         auto-runs `azzio --sshd-hypervisor` at boot. The base ISO must have
-         NEITHER, so we affirmatively remove both when building it -- otherwise a
-         leftover from the preceding sshd... (order is base-first today, but this
-         stays correct if the order ever flips) would bleed into the base ISO.
-      3. /etc/shadow -- the base ISO ships LOCKED accounts (no password login); the
-         sshd ISO replaces `main`'s field with the operator's build-time hash so
-         they can log in remotely with the --ssh password. Rewritten every pass so a
-         hashed shadow from a preceding sshd pass never leaks into the base ISO.
+      1. profiledef iso_name -- drives the artifact filename (azzio-headed[-instant][-ssh]-
+         <ver>.iso). Rewritten at the profile root every pass.
+      2. the sshd-hypervisor auto-setup service -- emitted AND enabled (a multi-user.target.wants
+         symlink) ONLY for the ssh-bearing variants, so those ISOs auto-run `azzio
+         --sshd-hypervisor` at boot. Non-ssh variants must have NEITHER, so we affirmatively
+         remove both when building them -- otherwise a leftover from a preceding ssh pass would
+         bleed in.
+      3. /etc/shadow -- non-ssh variants ship LOCKED accounts (no password login); the ssh
+         variants replace `main`'s field with the operator's build-time hash so they can log in
+         with the --ssh password. Rewritten every pass so a hashed shadow never leaks into a
+         non-ssh ISO.
+      4. the instant auto-install hook (openbox.INSTANT_INSTALL_HOOK_PATH) -- an executable that
+         `exec`s `azzioinstall --instant ...`; planted ONLY for the instant variants (so the live
+         session auto-installs at boot instead of opening Calamares) and affirmatively removed for
+         the non-instant ones.
 
-    ssh_password_hash is REQUIRED (a sha-512 crypt hash) when variant == "sshd": the
-    sshd ISO must never be built with the base locked shadow -- that would ship an sshd
-    nobody can authenticate to, silently hiding that the credential was dropped.
+    ssh_password_hash is REQUIRED (a sha-512 crypt hash) for the ssh-bearing variants: they must
+    never be built with the base locked shadow -- that would ship an sshd nobody can authenticate
+    to. instant_azzioinstall_args is REQUIRED (starts with `--instant`) for the instant variants.
 
     Everything else in the profile is identical across variants and already staged."""
     emit.write_exec(W / "profiledef.sh", profile.profiledef_sh(variant))
+
+    # (2)+(3) ssh behaviour: shadow + the sshd-hypervisor auto-setup service/enable-link.
     svc = airootfs / "etc/systemd/system/sshd-hypervisor-setup.service"
     link = (airootfs / "etc/systemd/system/multi-user.target.wants"
             / "sshd-hypervisor-setup.service")
-    if variant == "sshd":
+    if _variant_is_sshd(variant):
         if not ssh_password_hash:
             raise ValueError(
-                "_apply_variant: the sshd variant requires an --ssh password hash; "
-                "refusing to build an sshd ISO with the base (locked) shadow."
+                "_apply_variant: the sshd/instant+sshd variant requires an --ssh password hash; "
+                "refusing to build an ssh ISO with the base (locked) shadow."
             )
         # main gets the operator's real hash; root stays locked.
         emit.write_text(airootfs / "etc/shadow",
@@ -546,11 +743,26 @@ def _apply_variant(W: Path, airootfs: Path, variant: str,
         emit.write_text(svc, system.SSHD_HYPERVISOR_SETUP_SERVICE)
         emit.link("/etc/systemd/system/sshd-hypervisor-setup.service", link)
     else:
-        # Base ISO: LOCK the shadow (relock even if a prior sshd pass left a hashed
-        # one in the shared airootfs) and strip the sshd auto-setup unit + enable link.
+        # Non-ssh ISO: LOCK the shadow (relock even if a prior ssh pass left a hashed one in the
+        # shared airootfs) and strip the sshd auto-setup unit + enable link.
         emit.write_text(airootfs / "etc/shadow", system.shadow_for(None), mode=0o600)
         link.unlink(missing_ok=True)
         svc.unlink(missing_ok=True)
+
+    # (4) instant behaviour: the auto-install hook the live autostart runs in place of the GUI.
+    hook = airootfs / openbox.INSTANT_INSTALL_HOOK_PATH.lstrip("/")
+    if _variant_is_instant(variant):
+        if not instant_azzioinstall_args:
+            raise ValueError(
+                "_apply_variant: the instant/instant+sshd variant requires the resolved "
+                "azzioinstall --instant argument list; refusing to build an instant ISO with no "
+                "auto-install hook (it would boot to the GUI, silently ignoring --instant)."
+            )
+        emit.write_exec(hook, openbox.instant_install_hook_sh(instant_azzioinstall_args))
+    else:
+        # Non-instant ISO: remove any hook a preceding instant pass planted, so the shared
+        # autostart falls back to opening the Calamares GUI.
+        hook.unlink(missing_ok=True)
 
 
 def _emit_desktop(airootfs: Path, home: Path) -> None:
@@ -1869,6 +2081,15 @@ def main() -> int:
         sys.stderr.write("[x] " + ssh_flag_error + "\n")
         return 2
 
+    # HARD STOP: an invalid --instant combination -- a sub-flag given without --instant, a blank
+    # sub-flag value, --ssh clashing with an --instant identity override (username/root password),
+    # or an unknown --final action. Like the --ssh check, abort with an explanation BEFORE any
+    # setup rather than silently building the wrong ISO.
+    instant_flag_error = check_instant_flag(sys.argv[1:])
+    if instant_flag_error:
+        sys.stderr.write("[x] " + instant_flag_error + "\n")
+        return 2
+
     paths.CACHEDIR.mkdir(parents=True, exist_ok=True)
 
     # Python owns compile-full.log from here on: route stdout/stderr through a tee that
@@ -1900,22 +2121,40 @@ def main() -> int:
         print(f"[*] Compile capped at 75% of CPU cores ({makepkg.build_jobs()} of "
               f"{makepkg._cpu_count()} jobs). Pass --use-each-cpu to use every core.")
 
-    # Each run builds exactly ONE ISO. The base/headed ISO is the default. The
-    # `azzio-headed-ssh` ISO is built INDIVIDUALLY (in place of the base ISO, not on top
-    # of it) ONLY when `--ssh="<PASSWORD>"` supplies a non-empty string (DECISION 2 -- no
-    # default password is ever shipped; the ssh variant's credential comes from the operator
-    # at build time). The password is hashed HERE (sha-512 crypt) and threaded into run();
-    # the plaintext never leaves this process. An empty/missing --ssh -> the base ISO.
+    # Each run builds exactly ONE ISO, ALWAYS INDIVIDUALLY (in place of the base ISO, never on
+    # top of it). The base/headed ISO is the default; --ssh and --instant each swap in their own
+    # medium (and stack into azzio-headed-instant-ssh when both are given).
+    #
+    # --ssh: the `azzio-headed-ssh` medium, built ONLY when `--ssh="<PASSWORD>"` supplies a
+    # non-empty string (DECISION 2 -- no default password is ever shipped; the ssh variant's
+    # credential comes from the operator at build time). The password is hashed HERE (sha-512
+    # crypt) and threaded into run(); the plaintext never leaves this process. An empty/missing
+    # --ssh -> no ssh.
     ssh_password = parse_ssh_flag(sys.argv[1:])
     ssh_hash = ssh_password_hash(ssh_password) if ssh_password else None
-    if ssh_hash:
-        print("[*] --ssh supplied: building ONLY the opt-in `azzio-headed-ssh` ISO "
-              "(the base ISO is NOT built)")
-        print("    (the ssh medium sets `main`'s password from --ssh, enables sshd, and "
-              "opens port 22 at boot).")
+
+    # --instant: the auto-installing medium. Its presence (check_instant_flag already validated
+    # the combination above) makes the live session run `azzioinstall --instant <sub-flags>` at
+    # boot instead of opening Calamares. The sub-flags the operator passed are resolved into the
+    # exact azzioinstall argument list threaded into run(); None means --instant was not given.
+    instant_args = (instant_azzioinstall_args(sys.argv[1:])
+                    if instant_flag_present(sys.argv[1:]) else None)
+
+    # Announce the single medium selected, by its product-line name (instant before ssh).
+    selected_variant = _variants_for(ssh_hash, instant=instant_args is not None)[0]
+    selected_name = profile.iso_name_for(selected_variant)
+    if selected_variant == "base":
+        print(f"[*] Building ONLY the base `{selected_name}` ISO (ssh + instant disabled). Pass "
+              "--ssh=\"<PASSWORD>\" and/or --instant to build an opt-in ISO instead.")
     else:
-        print("[*] Building ONLY the base `azzio-headed` ISO (ssh disabled). Pass "
-              "--ssh=\"<PASSWORD>\" to build the opt-in `azzio-headed-ssh` ISO instead.")
+        print(f"[*] Building ONLY the opt-in `{selected_name}` ISO (the base ISO is NOT built).")
+        if ssh_hash:
+            print("    - ssh: `main`'s password is set from --ssh, sshd is enabled, and port 22 "
+                  "is opened at boot.")
+        if instant_args is not None:
+            shown = " ".join(instant_args)
+            print(f"    - instant: the live session auto-runs `azzioinstall {shown}` at boot to "
+                  "install onto disk unattended.")
 
     offline = cache_is_complete()
     _stale_cache_notice(offline)
@@ -1959,6 +2198,7 @@ def main() -> int:
     try:
         isos = run(bar, offline, full_compile=full_compile,
                    ssh_password_hash=ssh_hash,
+                   instant_azzioinstall_args=instant_args,
                    reclaim_after_mkarchiso=own.reclaim_full)
     except SystemExit as e:
         teardown()

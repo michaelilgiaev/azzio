@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 import profile
+from packages import openbox
 
 
 def test_profiledef_is_a_bash_script():
@@ -159,6 +160,23 @@ def test_openbox_autostart_stays_executable():
     assert f'["{skel}"]="0:0:755"' in sh
     # The stale Plasma plasma_icons backing-file pins must be GONE.
     assert not any("plasma_icons" in p for p in profile.FILE_PERMISSIONS)
+
+
+def test_instant_install_hook_stays_executable():
+    # THE INSTANT-ISO GUARD FIX: the instant / instant+sshd media plant an auto-install hook at
+    # openbox.INSTANT_INSTALL_HOOK_PATH, and the live OpenBox autostart runs it only behind a
+    # `[ -x '<hook>' ]` guard. openbox.instant_install_hook_sh is emitted 0755 (emit.write_exec),
+    # but archiso normalizes overlay modes to 0644 in the squashfs unless pinned here -- and then
+    # the guard FAILS and the instant medium boots to the Calamares GUI instead of auto-installing,
+    # silently defeating --instant (the same class of bug as the sidebar-sync/azzioinstall guards).
+    # Pin it 0755 and prove the pin renders into profiledef.sh, using the SAME path constant the
+    # autostart guards on so the two can never drift.
+    hook = openbox.INSTANT_INSTALL_HOOK_PATH
+    assert profile.FILE_PERMISSIONS[hook] == "0:0:755"
+    assert f'["{hook}"]="0:0:755"' in profile.profiledef_sh()
+    # The instant-variant profiledef must carry it too (that is the medium that actually ships it).
+    assert f'["{hook}"]="0:0:755"' in profile.profiledef_sh("instant")
+    assert f'["{hook}"]="0:0:755"' in profile.profiledef_sh("instant+sshd")
 
 
 def test_secrets_locked_down():

@@ -13,27 +13,41 @@ down shadow/gshadow/sudoers in the ISO.
 from __future__ import annotations
 
 # ISO base names per build variant. mkarchiso names the artifact
-# <iso_name>-<version>-<arch>.iso, so these drive the two output filenames:
-#   base -> azzio-headed-<ver>-x86_64.iso      (the normal live/install medium)
-#   sshd -> azzio-headed-ssh-<ver>-x86_64.iso  (same, but ssh is ENABLED and `main`
-#                                                has the operator's --ssh password)
+# <iso_name>-<version>-<arch>.iso, so these drive the output filenames:
+#   base         -> azzio-headed-<ver>-x86_64.iso              (the normal live/install medium)
+#   sshd         -> azzio-headed-ssh-<ver>-x86_64.iso          (same, but ssh is ENABLED and
+#                                                                `main` has the operator's --ssh password)
+#   instant      -> azzio-headed-instant-<ver>-x86_64.iso      (same, but the live session AUTO-RUNS
+#                                                                `azzioinstall --instant ...` at boot to
+#                                                                install onto disk unattended)
+#   instant+sshd -> azzio-headed-instant-ssh-<ver>-x86_64.iso  (both: an auto-installing medium with ssh
+#                                                                ALSO enabled on the live session; "instant"
+#                                                                comes BEFORE "ssh" in the name)
 #
-# "headed" is the product LINE and "-ssh" its sub-flavour. This leaves room for a future
-# "headless" line (azzio-headless) without disturbing the base/sshd variant KEYS the build
-# branches on -- those stay `base`/`sshd`; only the artifact NAME carries the product line.
-# The two ISOs are separated in output/ by the digit-anchored glob "{iso_name}-[0-9]*.iso":
-# "azzio-headed-2026..." matches base, "azzio-headed-ssh-..." does not (the char after
-# "azzio-headed-" is 's', not a digit), exactly as before the rename.
+# "headed" is the product LINE; "-instant" and "-ssh" are stackable sub-flavours. When both
+# apply, "instant" is emitted FIRST (azzio-headed-instant-ssh), never azzio-headed-ssh-instant.
+# This leaves room for a future "headless" line (azzio-headless) without disturbing the variant
+# KEYS the build branches on -- those stay base/sshd/instant/instant+sshd; only the artifact NAME
+# carries the product line. The ISOs are separated in output/ by the digit-anchored glob
+# "{iso_name}-[0-9]*.iso": "azzio-headed-2026..." matches base but NOT azzio-headed-ssh-... /
+# azzio-headed-instant-... (the char after "azzio-headed-" is a LETTER, not a digit), and
+# "azzio-headed-instant-[0-9]*" matches instant but NOT azzio-headed-instant-ssh-..., so every
+# variant's glob is disjoint -- exactly the property the ssh split already relied on.
 ISO_NAME = "azzio-headed"
 ISO_NAME_SSHD = "azzio-headed-ssh"
+ISO_NAME_INSTANT = "azzio-headed-instant"
+ISO_NAME_INSTANT_SSHD = "azzio-headed-instant-ssh"
 
 # The set of recognized build variants -> iso_name. compiler.run loops over the
 # runtime-selected variant (compiler._variants_for), calling iso_name_for to name the ISO.
-# Exactly one is built per run: the base ISO by default, or the sshd ISO INDIVIDUALLY
-# (in place of base, not alongside it) when --ssh is supplied.
+# Exactly one is built per run: the base ISO by default, the sshd ISO (--ssh), the instant
+# ISO (--instant), or the combined instant+sshd ISO (--instant AND --ssh) -- always INDIVIDUALLY
+# (in place of base, not alongside it).
 ISO_NAMES = {
     "base": ISO_NAME,
     "sshd": ISO_NAME_SSHD,
+    "instant": ISO_NAME_INSTANT,
+    "instant+sshd": ISO_NAME_INSTANT_SSHD,
 }
 
 ISO_PUBLISHER = "michaelilgiaev <https://github.com/michaelilgiaev/azzio>"
@@ -155,6 +169,16 @@ FILE_PERMISSIONS = {
     # or removed (the reported "Places does not update" bug: the file-monitor theory was sound,
     # but the watcher that rewrites the file was never even running because it shipped non-exec).
     "/usr/local/lib/azzio/azzio-sidebar-sync": "0:0:755",
+    # The instant ISO's auto-install hook (/usr/local/share/azzio/instant-install.sh), planted
+    # ONLY on the instant / instant+sshd media by compiler._apply_variant. SAME archiso mode-
+    # normalization as the executables above: openbox.instant_install_hook_sh is written 0755
+    # (emit.write_exec), but the squashfs ships it 0644 unless pinned here -- and then the live
+    # OpenBox autostart's `[ -x '/usr/local/share/azzio/instant-install.sh' ]` guard FAILS, the
+    # instant medium boots to the Calamares GUI instead of auto-running `azzioinstall --instant`,
+    # and the whole --instant feature silently does nothing. The base/sshd media never carry this
+    # file, so pinning its mode is inert there (a file_permissions entry for an absent path is a
+    # no-op in mkarchiso). Present on the instant media, executable, so the guard passes.
+    "/usr/local/share/azzio/instant-install.sh": "0:0:755",
     # The OpenBox session autostart (~/.config/openbox/autostart). openbox-session runs
     # it via /bin/sh, but it carries a shebang and openbox.PLAN emits it 0755, so pin it
     # executable here too (archiso would otherwise normalize it to 0644). Pin both the

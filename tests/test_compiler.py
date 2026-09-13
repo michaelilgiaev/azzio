@@ -37,15 +37,18 @@ import compiler
 # --- STEP_WEIGHTS <-> bar.step() count invariant ---------------------------
 
 def test_step_weights_length_and_shape():
-    # 13 lightweight setup/emit steps (index 0 unused sentinel + 12 real "8"s) then
-    # the four giants. Total 17 entries. There are TWO mkarchiso giants because the bar
-    # is sized for the MAX variant set (base + sshd); only one variant builds per run.
-    assert len(compiler.STEP_WEIGHTS) == 17
+    # 13 lightweight setup/emit steps (index 0 unused sentinel + 12 real "8"s), then the
+    # two non-mkarchiso giants (package-cache 250, makepkg 120), then ONE mkarchiso giant
+    # (270) per POSSIBLE ISO variant -- the bar is sized for the MAX variant set, though only
+    # one variant builds per run. Total = 1 + 12 + 2 + len(VARIANTS).
+    n_variants = len(compiler.VARIANTS)
+    assert len(compiler.STEP_WEIGHTS) == 15 + n_variants
     assert compiler.STEP_WEIGHTS[0] == 0
     assert compiler.STEP_WEIGHTS[1:13] == [8] * 12
-    # Final four, in order: package-cache giant, makepkg stage, and the TWO
-    # mkarchiso giants (one per POSSIBLE ISO variant; the run uses one of them).
-    assert compiler.STEP_WEIGHTS[-4:] == [250, 120, 270, 270]
+    # The two non-mkarchiso giants come right after the "8"s...
+    assert compiler.STEP_WEIGHTS[13:15] == [250, 120]
+    # ...then exactly one 270 mkarchiso giant per variant.
+    assert compiler.STEP_WEIGHTS[15:] == [270] * n_variants
 
 
 def test_step_weights_matches_executed_step_count():
