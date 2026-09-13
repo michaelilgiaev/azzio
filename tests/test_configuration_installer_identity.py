@@ -351,7 +351,11 @@ def test_collect_ssh_password_fallback_is_noninteractive(tmp_path):
     env = dict(os.environ)
     env.update({
         "AZ_INSTALL_SSH": "admin",
-        "AZ_INSTALL_HOSTNAME": "box", "AZ_INSTALL_USERNAME": "hypervisor",
+        # A THROWAWAY username, never a real account name: the collect fragment rejects a
+        # pre-seeded username that already exists on the machine running the test (the
+        # existing-account guard), so a name like "hypervisor"/"runner" would abort here on
+        # a box where that user is real. "sshbox" cannot collide.
+        "AZ_INSTALL_HOSTNAME": "box", "AZ_INSTALL_USERNAME": "sshbox",
         "AZ_INSTALL_TIMEZONE": "Asia/Jerusalem",
         # no AZ_INSTALL_PASSWORD / ROOT_PASSWORD / STAR_PASSWORD on purpose.
     })
