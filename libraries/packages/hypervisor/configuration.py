@@ -268,7 +268,7 @@ class Config:
     @property
     def shared_path(self) -> str:
         """The host directory to share, honouring hcfg.shared:
-        True -> the default ./Shared dir; a str -> that path; False -> '' (off)."""
+        True -> the default ./share dir; a str -> that path; False -> '' (off)."""
         s = self.hcfg.shared
         if s is True:
             return self.shared
@@ -299,7 +299,7 @@ class Config:
             proc=proc,
             disk=os.path.join(d, f"{vm}.qcow2"),
             vars=os.path.join(d, "OVMF_VARS.4m.fd"),
-            shared=os.path.join(d, "Shared"),
+            shared=os.path.join(d, "share"),
             spice_sock=os.path.join(d, ".spice.sock"),
             hypervisor_cfg_path=os.path.join(d, _HYPERVISOR_CFG_NAME),
             hcfg=hcfg,

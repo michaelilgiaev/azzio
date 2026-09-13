@@ -45,7 +45,7 @@ def make_cfg(directory: str, *, vm: str = "testvm", **hcfg_overrides) -> Config:
         dir=directory, vm=vm, proc=f"{vm}-vm"[:15],
         disk=os.path.join(directory, f"{vm}.qcow2"),
         vars=os.path.join(directory, "OVMF_VARS.4m.fd"),
-        shared=os.path.join(directory, "Shared"),
+        shared=os.path.join(directory, "share"),
         spice_sock=os.path.join(directory, ".spice.sock"),
         hypervisor_cfg_path=os.path.join(directory, "hypervisor.cfg"),
         hcfg=HypervisorCfg(**vals),

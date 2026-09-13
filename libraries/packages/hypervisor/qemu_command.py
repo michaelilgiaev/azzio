@@ -50,7 +50,7 @@ def _shared_args(cfg: Config) -> list[str]:
     exports it; QEMU only sees the socket. The required shared memory-backend is
     added separately in build_qemu_argv (it replaces the plain -m allocation).
 
-    cfg.shared_path resolves the union type: True -> the working ./Shared dir, a
+    cfg.shared_path resolves the union type: True -> the working ./share dir, a
     string -> that host path, False -> '' (disabled)."""
     if not cfg.shared_path:
         return []
