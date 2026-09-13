@@ -225,9 +225,10 @@ def ssh_password_hash(password: str) -> str:
 # --instant is STACKABLE with --ssh: `--instant --ssh="<PW>"` builds azzio-headed-INSTANT-ssh
 # (instant first in the name -- see profile.ISO_NAMES), an auto-installing medium that ALSO has
 # ssh enabled on the live session (so the unattended install can be watched/driven over SSH).
-# The ONE restriction (see check_instant_flag): when --ssh is passed, the `main` login user and
-# root credential of the medium are already governed by the --ssh password, so re-setting the
-# INSTALLED system's username / root password via --instant is contradictory and is a HARD ERROR.
+# The ONE restriction (see check_instant_flag): when --ssh is passed, the medium's user and root
+# credential are already governed by the --ssh password, so re-setting the INSTALLED system's user
+# password (--username-password) or root password (--root-password) via --instant is contradictory
+# and is a HARD ERROR. Nothing else clashes: --username (which user) and the share toggle are fine.
 
 # The --instant sub-flags, MIRRORING azzioinstall's own --instant options 1:1 (see
 # packages/openbox usage text). Each is forwarded to azzioinstall verbatim when present; an
@@ -244,14 +245,16 @@ INSTANT_SUBFLAGS = (
     "--final",
 )
 
-# The sub-flags that set the medium's LOGIN USER and ROOT credential. These are the ones the
-# spec forbids alongside --ssh (the --ssh password already IS that credential story: `main`
-# logs in with it, root stays locked). --username-password (the user's *password*, distinct
-# from *which* user and from *root's* password) is intentionally NOT here -- it stays allowed
-# with --ssh, so an instant+ssh medium can still choose the installed user's password.
+# The sub-flags that set an actual PASSWORD, which the --ssh password already governs. These are
+# the ONLY two the spec forbids alongside --ssh (the --ssh password already IS the credential
+# story: `main` logs in with it, and it seeds the root credential too). Setting either password
+# again via --instant contradicts that.
+#   --username-password  the *user's* password
+#   --root-password      *root's* password
+# --username (merely *which* user) and --share-username-root-password (a policy TOGGLE that sets
+# no password itself) do NOT set a password, so they stay allowed alongside --ssh.
 INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH = (
-    "--username",
-    "--share-username-root-password",
+    "--username-password",
     "--root-password",
 )
 
@@ -312,9 +315,10 @@ def check_instant_flag(argv: list[str]) -> str | None:
       1. An --instant sub-flag (--username/--hostname/...) given WITHOUT --instant is a hard
          error -- it would silently do nothing (mirrors azzioinstall's own gate; a silent no-op
          would build an ISO with defaults the operator thought they had overridden).
-      2. With --ssh present, the identity sub-flags that set the login user / root credential
-         (INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH) are a hard error: the --ssh password
-         already governs that credential, so setting it again via --instant is contradictory.
+      2. With --ssh present, the sub-flags that set a PASSWORD -- the user password and root
+         password (INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH) -- are a hard error: the --ssh
+         password already governs that credential, so setting it again via --instant is
+         contradictory. --username / --share-username-root-password set no password and are fine.
       3. --final, if given, must be one of INSTANT_FINAL_VALUES (a typo must fail the compile).
       4. A sub-flag azzioinstall needs non-empty (everything except... all of them, really) must
          not be blank: `--username=` etc. is a hard error (an empty override is never intended).
@@ -341,17 +345,17 @@ def check_instant_flag(argv: list[str]) -> str | None:
                 f'(e.g. {name}=...), or omit it to keep the azzioinstall default.'
             )
 
-    # Rule 2: --ssh forbids setting the installed username / root password via --instant.
+    # Rule 2: --ssh forbids setting the installed user / root password via --instant.
     if ssh_flag_present(argv):
         clash = [n for n in INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH if n in present]
         if clash:
             joined = " ".join(clash)
             return (
                 f"--ssh cannot be combined with{''.join(' ' + c for c in clash)}. "
-                f"The --ssh password already sets the medium's login user (main) and root "
-                f"credential, so setting the installed system's username / root password with "
-                f"--instant contradicts it. Drop {joined} (the instant+ssh ISO installs `main` "
-                f"with the ssh password), or drop --ssh to choose them freely with --instant."
+                f"The --ssh password already sets the medium's user and root credential, so "
+                f"setting the installed system's user / root password with --instant contradicts "
+                f"it. Drop {joined} (the instant+ssh ISO installs `main` with the ssh password), "
+                f"or drop --ssh to choose them freely with --instant."
             )
 
     # Rule 3: --final must be a known action.

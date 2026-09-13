@@ -584,8 +584,8 @@ def test_iso_selection_glob_distinguishes_base_from_sshd():
 # --instant <sub-flags>` at boot -- the fully-scripted installer, already implemented in
 # packages/openbox -- instead of opening the Calamares GUI. Unlike --ssh, --instant carries
 # NO value (its presence is the opt-in) and a bare `--instant` is VALID. It STACKS with --ssh,
-# except the identity sub-flags that set the login user / root credential are rejected then
-# (the --ssh password already governs those). Checked as pure data/emit (no mkarchiso).
+# except the two password-setting sub-flags (--username-password / --root-password) are rejected
+# then (the --ssh password already governs those). Checked as pure data/emit (no mkarchiso).
 # =============================================================================
 
 
@@ -723,16 +723,15 @@ def test_check_instant_good_final_ok(good):
     assert compiler.check_instant_flag(["--instant", f"--final={good}"]) is None
 
 
-# --- the ONE cross-flag restriction: --ssh forbids username / root password ---
+# --- the ONE cross-flag restriction: --ssh forbids setting a password ---
 
 @pytest.mark.parametrize("clashing", [
-    "--username=alice",
+    "--username-password=secret",
     "--root-password=secret",
-    "--share-username-root-password=False",
 ])
 def test_check_instant_ssh_plus_identity_is_hard_error(clashing):
-    # With --ssh, the medium's login user / root credential come from the --ssh password, so
-    # re-setting them via --instant is contradictory -> hard error (the spec's rule).
+    # With --ssh, the medium's user / root credential come from the --ssh password, so re-setting
+    # either password via --instant is contradictory -> hard error (the spec's rule).
     msg = compiler.check_instant_flag(["--instant", "--ssh=pw", clashing])
     assert msg, f"--ssh + {clashing} must be a hard error"
     assert "--ssh" in msg
@@ -740,7 +739,8 @@ def test_check_instant_ssh_plus_identity_is_hard_error(clashing):
 
 
 @pytest.mark.parametrize("allowed", [
-    "--username-password=secret",   # the user's PASSWORD is allowed (only USERNAME is forbidden)
+    "--username=alice",                     # picking WHICH user is allowed (sets no password)
+    "--share-username-root-password=False",  # a policy toggle, sets no password itself
     "--hostname=box",
     "--timezone=Europe/London",
     "--disk=sda",
@@ -751,17 +751,18 @@ def test_check_instant_ssh_plus_nonidentity_is_ok(allowed):
 
 
 def test_check_instant_ssh_plus_bare_instant_ok():
-    # --instant + --ssh with no identity overrides is a valid combo (azzio-headed-instant-ssh).
+    # --instant + --ssh with no password overrides is a valid combo (azzio-headed-instant-ssh).
     assert compiler.check_instant_flag(["--instant", "--ssh=pw"]) is None
 
 
-def test_identity_conflict_set_is_exactly_username_and_root_password():
-    # Pin the spec's "username and root password" mapping: --username, --root-password, and the
-    # share toggle (its mechanism). --username-password is deliberately NOT in the set.
+def test_identity_conflict_set_is_exactly_the_two_password_flags():
+    # Pin the spec: ONLY the two password-setting flags clash with --ssh. --username (which user)
+    # and --share-username-root-password (a policy toggle) set no password and are NOT in the set.
     assert set(compiler.INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH) == {
-        "--username", "--root-password", "--share-username-root-password",
+        "--username-password", "--root-password",
     }
-    assert "--username-password" not in compiler.INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH
+    for allowed in ("--username", "--share-username-root-password"):
+        assert allowed not in compiler.INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH
 
 
 # --- _variants_for: instant selects the right single variant ------------------
@@ -993,17 +994,19 @@ def test_main_exits_nonzero_on_subflag_without_instant(monkeypatch, capsys):
     assert "--instant" in err and "--username" in err
 
 
-def test_main_exits_nonzero_on_ssh_plus_username(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["compiler", "--instant", "--ssh=pw", "--username=alice"])
+def test_main_exits_nonzero_on_ssh_plus_password(monkeypatch, capsys):
+    # --ssh clashes with a PASSWORD-setting sub-flag (--username-password / --root-password).
+    monkeypatch.setattr(
+        sys, "argv", ["compiler", "--instant", "--ssh=pw", "--username-password=secret"])
 
     def _boom(*a, **k):
-        raise AssertionError("run() must NOT be reached when --ssh clashes with --username")
+        raise AssertionError("run() must NOT be reached when --ssh clashes with a password flag")
 
     monkeypatch.setattr(compiler, "run", _boom)
     rc = compiler.main()
     assert rc != 0
     err = capsys.readouterr().err
-    assert "--ssh" in err and "--username" in err
+    assert "--ssh" in err and "--username-password" in err
 
 
 def test_main_exits_nonzero_on_bad_final(monkeypatch, capsys):
