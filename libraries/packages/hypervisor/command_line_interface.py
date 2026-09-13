@@ -40,7 +40,7 @@ def usage(cfg: Config) -> str:
 hypervisor - run a QEMU/KVM VM from the current directory.
 
 Each directory is its own independent VM (name derived from folder: '{cfg.vm}').
-Files created here: {cfg.vm}.qcow2 (disk), OVMF_VARS.4m.fd (UEFI NVRAM),
+Files created here: azzio.qcow2 (disk), OVMF_VARS.4m.fd (UEFI NVRAM),
 share/ (host<->guest folder), hypervisor.cfg (settings).
 
 USAGE:

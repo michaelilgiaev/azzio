@@ -162,7 +162,10 @@ def test_from_cwd_derives_identity_from_dir(tmp_path, monkeypatch):
     cfg = Config.from_cwd()
     assert cfg.vm == "my-vm"
     assert cfg.proc == "my-vm-vm"
-    assert cfg.disk.endswith("my-vm.qcow2")
+    # Identity (vm/proc) comes from the dir, but the disk name is FIXED: always
+    # azzio.qcow2, never the folder slug.
+    assert cfg.disk.endswith("azzio.qcow2")
+    assert "my-vm.qcow2" not in cfg.disk
 
 
 # --- ISO discovery: REQUIRED, must be a .iso --------------------------------
@@ -194,7 +197,17 @@ def test_resolve_iso_missing_named_file_raises(tmp_path):
 
 # --- disk discovery for `run`: REQUIRED, must be a .qcow2 -------------------
 
-def test_resolve_run_disk_requires_an_argument(tmp_path):
+def test_resolve_run_disk_no_arg_falls_back_to_fixed_disk(tmp_path):
+    # No argument -> boot this dir's fixed azzio.qcow2 when it exists (so `hypervisor
+    # run` with no args just works after `install`).
+    (tmp_path / "azzio.qcow2").write_text("x")
+    cfg = _make_cfg("testvm", directory=str(tmp_path))
+    assert cfg.resolve_run_disk("") == str(tmp_path / "azzio.qcow2")
+
+
+def test_resolve_run_disk_no_arg_raises_when_no_disk(tmp_path):
+    # No argument AND no azzio.qcow2 on disk -> a clean error (install first), not a
+    # boot with nothing.
     cfg = _make_cfg("testvm", directory=str(tmp_path))
     with pytest.raises(HypervisorError):
         cfg.resolve_run_disk("")

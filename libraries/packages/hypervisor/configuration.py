@@ -40,6 +40,10 @@ DEFAULT_SSH_FORWARD_PORT = 49155
 
 _HYPERVISOR_CFG_NAME = "hypervisor.cfg"
 
+# The system disk is ALWAYS this name, in every VM dir -- not derived from the
+# folder. Referenced by Config.from_cwd() and by resolve_run_disk()'s fallback.
+DISK_NAME = "azzio.qcow2"
+
 # Defaults as already-COERCED Python values (the same types coerce_all yields):
 # bools are bool, ram/cpus/port are int, shared/usb use their union types.
 _CFG_DEFAULTS: dict = {
@@ -279,10 +283,11 @@ class Config:
     @property
     def virtiofs_sock(self) -> str:
         """The vhost-user UNIX socket the virtiofsd daemon listens on and QEMU
-        connects to for the shared folder. Lives beside .spice.sock in the VM dir
-        (a dotfile so it does not clutter the share); one per VM dir, so two VMs
-        never collide. Derived, not a stored field -- like the spice socket."""
-        return os.path.join(self.dir, ".virtiofs.sock")
+        connects to for the shared folder. Lives beside virtiofs.sock in the VM dir;
+        one per VM dir, so two VMs never collide. Derived, not a stored field -- like
+        the spice socket. VISIBLE (no leading dot): the hypervisor hides nothing, so
+        the user can see and hand-remove any leftover if they ever need to."""
+        return os.path.join(self.dir, "virtiofs.sock")
 
     @classmethod
     def from_cwd(cls) -> "Config":
@@ -297,10 +302,14 @@ class Config:
             dir=d,
             vm=vm,
             proc=proc,
-            disk=os.path.join(d, f"{vm}.qcow2"),
+            # The disk is ALWAYS azzio.qcow2 -- a fixed name, NOT derived from the
+            # directory slug. Every azzio VM's system disk is the azzio image; naming
+            # it after the folder (codelis.qcow2, worktest.qcow2, ...) was noise. The
+            # VM identity (vm/proc, so two dirs never collide) still comes from the dir.
+            disk=os.path.join(d, DISK_NAME),
             vars=os.path.join(d, "OVMF_VARS.4m.fd"),
             shared=os.path.join(d, "share"),
-            spice_sock=os.path.join(d, ".spice.sock"),
+            spice_sock=os.path.join(d, "spice.sock"),
             hypervisor_cfg_path=os.path.join(d, _HYPERVISOR_CFG_NAME),
             hcfg=hcfg,
             code=CODE,
@@ -336,9 +345,13 @@ class Config:
 
     # --- disk argument: REQUIRED, must be a .qcow2 that exists ---------------
     def resolve_run_disk(self, arg: str) -> str:
-        """A .qcow2 file is mandatory. Accepts a path or a bare filename in CWD."""
+        """The .qcow2 to boot. Accepts a path or a bare filename in CWD; with NO
+        argument it falls back to this dir's fixed azzio.qcow2 (the disk `install`
+        creates), so `hypervisor run` just works."""
         if not arg:
-            die("a disk is required -- e.g. 'hypervisor run azzio.qcow2'")
+            if os.path.isfile(self.disk):
+                return self.disk
+            die(f"no disk to boot: {self.disk} -- run 'hypervisor install <iso>' first")
         if not arg.endswith(".qcow2"):
             die(f"expected a .qcow2 file, got: {arg}")
         if "/" in arg:

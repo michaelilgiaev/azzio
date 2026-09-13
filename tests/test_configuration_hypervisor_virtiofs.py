@@ -45,35 +45,23 @@ def test_daemon_spawned_when_shared_on_regardless_of_ssh(tmp_path):
         assert cfg.virtiofs_sock in joined          # on the vhost-user socket QEMU reads
 
 
-def test_daemon_runs_as_root_via_sudo(tmp_path):
-    # THE writable-share guard. virtiofsd must run as ROOT: only root can setfsuid()
-    # to the guest's credentials before a host create, so an UNPRIVILEGED daemon lets
-    # the guest read but NOT create files -- a silent regression from the old 9p share.
-    # The daemon is therefore spawned through sudo. `sudo` must be argv[0] (nothing may
-    # precede it) and the real virtiofsd binary must come straight after.
+def test_daemon_runs_rootless_no_sudo(tmp_path):
+    # THE sudo-is-bugged-on-host guard. sudo unreliability was causing `sudo virtiofsd`
+    # to never start, so the socket never appeared and QEMU died "Failed to connect ...
+    # No such file or directory". virtiofsd must therefore run ROOTLESS: no sudo may
+    # appear anywhere in the argv, and the real binary must be argv[0].
     cfg = _cfg(tmp_path, shared=True)
     argv = vm.virtiofsd_argv(cfg)
-    assert argv[0] == "sudo", f"virtiofsd must run via sudo (as root); got {argv[0]!r}"
-    # the token right after sudo (skipping any sudo flags) is the virtiofsd binary
-    binary = next(a for a in argv[1:] if not a.startswith("-"))
-    assert binary.endswith("virtiofsd")
+    assert "sudo" not in argv, f"virtiofsd must run rootless (no sudo); got {argv!r}"
+    assert argv[0].endswith("virtiofsd"), f"binary must be argv[0]; got {argv[0]!r}"
 
 
-def test_daemon_sets_socket_group_so_nonroot_qemu_can_connect(tmp_path):
-    # A root-owned vhost-user socket is srwx------ root and the (non-root) QEMU cannot
-    # open it. --socket-group hands the socket to the invoking user's primary group so
-    # QEMU connects with no post-hoc chmod. The group is passed in (keeps the builder
-    # PURE and testable); a concrete group name must reach the flag.
+def test_daemon_needs_no_socket_group_when_rootless(tmp_path):
+    # Rootless -> the socket is owned by the invoking user and the (same-user, non-root)
+    # QEMU opens it directly. No --socket-group hand-off is needed or emitted, and the
+    # builder takes no group argument any more.
     cfg = _cfg(tmp_path, shared=True)
-    argv = vm.virtiofsd_argv(cfg, socket_group="staff")
-    assert "--socket-group=staff" in argv
-
-
-def test_no_socket_group_flag_when_group_unknown(tmp_path):
-    # If the primary group cannot be resolved, emit no --socket-group (virtiofsd rejects
-    # an empty group); the daemon still runs as root and the caller falls back to chmod.
-    cfg = _cfg(tmp_path, shared=True)
-    argv = vm.virtiofsd_argv(cfg, socket_group=None)
+    argv = vm.virtiofsd_argv(cfg)
     assert not any(a.startswith("--socket-group") for a in argv)
 
 

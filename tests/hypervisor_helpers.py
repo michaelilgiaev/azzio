@@ -43,10 +43,13 @@ def make_cfg(directory: str, *, vm: str = "testvm", **hcfg_overrides) -> Config:
     vals.update(hcfg_overrides)
     return Config(
         dir=directory, vm=vm, proc=f"{vm}-vm"[:15],
-        disk=os.path.join(directory, f"{vm}.qcow2"),
+        # Fixed disk name (azzio.qcow2), not derived from vm slug -- matches
+        # Config.from_cwd. Sockets are VISIBLE (no leading dot) -- the hypervisor
+        # hides nothing.
+        disk=os.path.join(directory, "azzio.qcow2"),
         vars=os.path.join(directory, "OVMF_VARS.4m.fd"),
         shared=os.path.join(directory, "share"),
-        spice_sock=os.path.join(directory, ".spice.sock"),
+        spice_sock=os.path.join(directory, "spice.sock"),
         hypervisor_cfg_path=os.path.join(directory, "hypervisor.cfg"),
         hcfg=HypervisorCfg(**vals),
         code="/usr/share/edk2/x64/OVMF_CODE.4m.fd",
