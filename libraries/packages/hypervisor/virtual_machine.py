@@ -219,7 +219,7 @@ def do_run(cfg: Config, install_iso: str = "") -> None:
     disk = cfg.disk
     if not os.path.isfile(cfg.vars):
         shutil.copyfile(cfg.vars_tmpl, cfg.vars)
-    # Only auto-create the DEFAULT working ./share dir; a user-named custom path
+    # Only auto-create the DEFAULT working ./shared dir; a user-named custom path
     # is the user's own responsibility (we never mkdir an arbitrary host path).
     if hcfg.shared is True:
         os.makedirs(cfg.shared, exist_ok=True)
@@ -606,7 +606,7 @@ def do_share_print() -> None:
 
 
 _SHARE_TEXT = """\
-Run THESE commands ONCE INSIDE THE GUEST to auto-mount the host ./share folder
+Run THESE commands ONCE INSIDE THE GUEST to auto-mount the host ./shared folder
 at ~/Shared on every boot (any modern Linux guest -- the virtiofs driver is
 in-tree, so no module or package is needed):
 

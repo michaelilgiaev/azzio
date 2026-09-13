@@ -41,7 +41,7 @@ hypervisor - run a QEMU/KVM VM from the current directory.
 
 Each directory is its own independent VM (name derived from folder: '{cfg.vm}').
 Files created here: azzio.qcow2 (disk), OVMF_VARS.4m.fd (UEFI NVRAM),
-share/ (host<->guest folder), hypervisor.cfg (settings).
+shared/ (host<->guest folder), hypervisor.cfg (settings).
 
 USAGE:
   hypervisor install <file.iso> [--shared] [--ssh[=PORT]] [--share-host-gpu]
@@ -53,7 +53,7 @@ USAGE:
                              installer ISO for repair or first-time install. An
                              EMPTY disk auto-attaches the dir's single ISO.
   hypervisor share [--offline]
-                             Print commands to mount the host ./share folder
+                             Print commands to mount the host ./shared folder
                              inside the guest. --offline edits the powered-off
                              disk directly (Btrfs @/@home layout only).
   hypervisor status          Show VM name, files, running state, SSH port, toggles.

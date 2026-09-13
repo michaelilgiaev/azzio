@@ -272,7 +272,7 @@ class Config:
     @property
     def shared_path(self) -> str:
         """The host directory to share, honouring hcfg.shared:
-        True -> the default ./share dir; a str -> that path; False -> '' (off)."""
+        True -> the default ./shared dir; a str -> that path; False -> '' (off)."""
         s = self.hcfg.shared
         if s is True:
             return self.shared
@@ -308,7 +308,7 @@ class Config:
             # VM identity (vm/proc, so two dirs never collide) still comes from the dir.
             disk=os.path.join(d, DISK_NAME),
             vars=os.path.join(d, "OVMF_VARS.4m.fd"),
-            shared=os.path.join(d, "share"),
+            shared=os.path.join(d, "shared"),
             spice_sock=os.path.join(d, "spice.sock"),
             hypervisor_cfg_path=os.path.join(d, _HYPERVISOR_CFG_NAME),
             hcfg=hcfg,
