@@ -19,13 +19,13 @@ Technical, developer-facing specification of the Azzio Linux distribution. It is
 |---|---:|
 | Explicit manifest entries | 259 (274 non-comment lines; 15 duplicate lines de-duped) |
 | Explicit entries incl. group members (e.g. `xorg`) | 256 |
-| **Full package set (transitive closure)** | **1241** |
-| &nbsp;&nbsp;from `core` / `extra` / `multilib` | 227 / 925 / 89 |
-| Edition: Azzio Component / Stock Arch | 745 / 496 |
+| **Full package set (transitive closure)** | **1243** |
+| &nbsp;&nbsp;from `core` / `extra` / `multilib` | 229 / 925 / 89 |
+| Edition: Azzio Component / Stock Arch | 745 / 498 |
 | Top / leaf packages (nothing depends on them) | 177 |
 | Base / sink packages (depend on nothing else in the set) | 78 |
 | Deepest dependency chain (leaf -> base) | 38 hops |
-| Total installed size of the package set | 22.58 GiB |
+| Total installed size of the package set | 22.64 GiB |
 
 **Edition tags** (used throughout, and marked on the component graph):
 
@@ -96,7 +96,7 @@ What the medium can do, grouped by the role each component plays. Counts and siz
 
 | Category | Components | Installed size | Provides |
 |---|---:|---:|---|
-| Kernel & firmware | 32 | 1.34 GiB | the Linux kernel, CPU microcode, and device firmware blobs |
+| Kernel & firmware | 34 | 1.34 GiB | the Linux kernel, CPU microcode, and device firmware blobs |
 | Boot & init | 14 | 123.3 MiB | boot loaders for both firmware types, the initramfs generator, and the systemd init/service manager |
 | Core system | 13 | 71.5 MiB | the base userland -- C library, coreutils, package manager, PAM/polkit, and privilege escalation |
 | Shell & CLI tools | 31 | 76.1 MiB | interactive shells, terminal editors, pagers, multiplexers, and everyday command-line utilities |
@@ -114,8 +114,8 @@ What the medium can do, grouped by the role each component plays. Counts and siz
 | Printing & scanning | 4 | 16.2 MiB | the printing subsystem and its device support |
 | Bluetooth & devices | 12 | 16.8 MiB | Bluetooth, USB, accessibility, and other peripheral device support |
 | Virtualization guest | 6 | 9.2 MiB | guest integration agents for the major hypervisors |
-| Shared library | 365 | 6.49 GiB | shared libraries other components link against |
-| System | 237 | 9.73 GiB | supporting system components that back the above |
+| Shared library | 365 | 6.51 GiB | shared libraries other components link against |
+| System | 237 | 9.77 GiB | supporting system components that back the above |
 
 ---
 
