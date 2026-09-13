@@ -4,6 +4,4 @@ logs/
 __pycache__/
 venv/
 .pytest_cache/
-data/
-docs/
 tests/test_modes.conf

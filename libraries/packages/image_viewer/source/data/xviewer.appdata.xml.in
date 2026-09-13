@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>xviewer.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-2.0</project_license>
+  <name>Xviewer</name>
+  <summary>Image Viewer</summary>
+  <description>
+    <p>
+      Xviewer is an image viewer which supports many formats. It can be used to view single images or images in a collection.
+    </p>
+    <p>
+      Xviewer also allows to view the images in a fullscreen slideshow mode
+      or set an image as the desktop wallpaper.
+      It reads the camera tags to automatically rotate your images in the correct
+      portrait or landscape orientation.
+    </p>
+  </description>
+  <launchable type="desktop-id">xviewer.desktop</launchable>
+  <url type="homepage">https://github.com/linuxmint/xviewer</url>
+</component>
