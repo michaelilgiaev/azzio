@@ -42,6 +42,14 @@ LIVE_ROOTFS_RSYNC_EXCLUDES = (
 )
 
 
+# The live session's host<->guest shared folder (virtiofs). Must match system.py's
+# HOME_MAIN_SHARED_MOUNT Where= exactly -- that .mount unit is what makes this path exist
+# on the live medium (the hypervisor exports the host's `shared/` dir under the "shared"
+# virtiofs tag, mounted here). `azzioinstall --final-indication="True"` drops INSTALL_DONE
+# here so the HOST can confirm the unattended install ran to completion (see installer_sh).
+LIVE_SHARED_DIR = "/home/main/Shared"
+
+
 # --- The disk installer (runs in the live session) --------------------------
 def installer_sh() -> str:
     body = """\
@@ -273,10 +281,64 @@ cp /root/azzio/chroot-setup.sh /mnt/chroot-setup.sh
 chmod +x /mnt/chroot-setup.sh
 
 echo "Running chroot setup..."
-arch-chroot /mnt /bin/bash /chroot-setup.sh
-rm /mnt/chroot-setup.sh
+# Capture the chroot-setup result. This script runs under `set -o pipefail` but
+# NOT `set -e`, so a failure here would otherwise fall straight through to the
+# INSTALL_DONE marker below and power off -- making a BROKEN install (bad
+# bootloader, failed pacman, etc.) indistinguishable from a good one to the host
+# watching shared/. Record it so the marker can report the TRUTH.
+AZ_INSTALL_RC=0
+arch-chroot /mnt /bin/bash /chroot-setup.sh || AZ_INSTALL_RC=$?
+rm -f /mnt/chroot-setup.sh
 
 umount -R /mnt
+
+# FINAL INDICATION (`azzioinstall --instant --final-indication="True"`). AZ_INSTALL_FINAL_INDICATION
+# is set only by the unattended path (run_auto normalises it to exactly "True"/"False"). When "True",
+# drop a result marker into the LIVE session's host<->guest shared folder (/home/main/Shared, the
+# virtiofs mount the hypervisor exports from the host's `shared/` dir) BEFORE the final shutdown/
+# reboot action below. That lets the HOST examine shared/ to conclude the ISO install's outcome --
+# crucial for a `--final="shutdown"` ISO, where the machine powering itself off is otherwise
+# indistinguishable from a mid-install crash.
+#
+# The marker reflects the TRUTH, not merely "the script reached its end": we write INSTALL_DONE ONLY
+# when chroot-setup succeeded (AZ_INSTALL_RC = 0), and INSTALL_FAILED (carrying the non-zero rc)
+# otherwise. Without this, the absence of `set -e` means a broken install (failed bootloader/pacman
+# inside the chroot) would still fall through and drop INSTALL_DONE, lying to the host. The host
+# (e.g. the codelis launcher) treats INSTALL_DONE as success and a missing/INSTALL_FAILED marker as
+# not-success. Written after `umount -R /mnt`, before systemd poweroff/reboot.
+#
+# Best-effort and NON-FATAL: a VM booted without --shared has no mount at %LIVE_SHARED_DIR% and the
+# marker is simply skipped (the final action still runs). run_auto leaves the var unset for the
+# default "False", so this whole block is a no-op unless --final-indication="True" was passed.
+case "${AZ_INSTALL_FINAL_INDICATION:-False}" in
+    [tT][rR][uU][eE])
+        if mountpoint -q "%LIVE_SHARED_DIR%" 2>/dev/null || [ -d "%LIVE_SHARED_DIR%" ]; then
+            # Clear any stale marker from a prior attempt so the host never reads an old result.
+            rm -f "%LIVE_SHARED_DIR%/INSTALL_DONE" "%LIVE_SHARED_DIR%/INSTALL_FAILED" 2>/dev/null
+            if [ "${AZ_INSTALL_RC:-0}" -eq 0 ]; then
+                az_marker="INSTALL_DONE"; az_result="ok"
+            else
+                az_marker="INSTALL_FAILED"; az_result="fail"
+            fi
+            {
+                echo "$az_marker"
+                echo "result=$az_result"
+                echo "rc=${AZ_INSTALL_RC:-0}"
+                echo "final=${AZ_INSTALL_FINAL:-idle}"
+                echo "username=${AZ_INSTALL_USERNAME:-main}"
+                echo "hostname=${AZ_INSTALL_HOSTNAME:-azzio}"
+            } > "%LIVE_SHARED_DIR%/$az_marker" 2>/dev/null \
+                && sync "%LIVE_SHARED_DIR%/$az_marker" 2>/dev/null \
+                && echo -e "${LIGHT_BLUE}wrote install indication -> %LIVE_SHARED_DIR%/$az_marker${RESET}" \
+                || echo -e "${RED}could not write install indication to %LIVE_SHARED_DIR%/$az_marker${RESET}"
+        else
+            echo -e "${RED}--final-indication=True but no shared folder mounted at %LIVE_SHARED_DIR%; skipping install indication${RESET}"
+        fi
+        ;;
+    *)
+        : # False (default) -- no indication file.
+        ;;
+esac
 
 # POST-INSTALL ACTION (`azzioinstall --instant --final=...`). AZ_INSTALL_FINAL is set only by
 # the unattended path (idle/reboot/shutdown; run_auto normalises "restart" to "reboot" and
@@ -302,6 +364,7 @@ esac
     # and the rsync exclude flags. Prefix /mnt: the installer targets the mounted new root.
     body = body.replace("%IDENTITY_COLLECT%", installer_identity.identity_collect_sh().strip("\n"))
     body = body.replace("%IDENTITY_WRITE%", installer_identity.identity_write_sh().strip("\n"))
+    body = body.replace("%LIVE_SHARED_DIR%", LIVE_SHARED_DIR)
     excludes = " ".join(f"--exclude={p}" for p in LIVE_ROOTFS_RSYNC_EXCLUDES)
     return body.replace("%RSYNC_EXCLUDES%", excludes)
 

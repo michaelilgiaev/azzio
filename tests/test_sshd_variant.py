@@ -646,10 +646,12 @@ def test_instant_subflags_present_lists_in_canonical_order():
 
 def test_all_azzioinstall_instant_subflags_are_mirrored():
     # Every --instant option azzioinstall accepts must be forwardable by the compiler, else an
-    # operator could not reach it at build time. Pins the 1:1 mirror.
+    # operator could not reach it at build time. Pins the 1:1 mirror. --final-indication is the
+    # newest member (drops shared/INSTALL_DONE; see the --final-indication section below).
     assert set(compiler.INSTANT_SUBFLAGS) == {
         "--disk", "--hostname", "--username", "--username-password",
         "--share-username-root-password", "--root-password", "--timezone", "--final",
+        "--final-indication",
     }
 
 
@@ -1109,3 +1111,231 @@ def test_main_threads_instant_args_into_run(monkeypatch):
     # No COMPILER-level --ssh was supplied, so no live-session ssh hash is threaded (that is a
     # separate concern from the installed-system --ssh=admin above).
     assert captured.get("ssh_password_hash") is None
+
+
+# =============================================================================
+# --final-indication="True"/"False": the sub-flag that makes the unattended install
+# drop a shared/INSTALL_DONE marker just before its final action, so a HOST watching
+# the shared/ folder can conclude the install actually SUCCEEDED (indispensable with
+# --final="shutdown", where a clean power-off and a mid-install crash both just look
+# like "the VM went away"). Wired across all three layers: the compiler forwards it
+# onto the azzioinstall command line (compiler.py), the guest CLI normalises + exports
+# AZ_INSTALL_FINAL_INDICATION (packages/openbox), and installer.installer_sh() writes
+# the marker guarded on that env var. Checked as pure data/emit (no VM, no install).
+# =============================================================================
+
+
+# --- the sub-flag is mirrored + emitted in canonical order -------------------
+
+def test_final_indication_is_a_recognised_instant_subflag():
+    # It must be forwardable at build time or an operator could never bake it into an ISO.
+    assert "--final-indication" in compiler.INSTANT_SUBFLAGS
+
+
+def test_final_indication_subflag_present_and_ordered_last():
+    # instant_subflags_present reports in INSTANT_SUBFLAGS order; --final-indication is last, so
+    # it sorts after --final regardless of argv order.
+    argv = ["--instant", "--final-indication=True", "--username=me", "--final=shutdown"]
+    assert compiler.instant_subflags_present(argv) == [
+        "--username", "--final", "--final-indication"]
+
+
+def test_final_indication_values_are_true_false():
+    # The accepted set (case-insensitive) is exactly True/False -- nothing else.
+    assert set(compiler.INSTANT_FINAL_INDICATION_VALUES) == {"true", "false"}
+
+
+# --- forwarding onto the azzioinstall command line ---------------------------
+
+def test_instant_azzioinstall_args_forwards_final_indication():
+    # A True value rides verbatim onto the command line (after --final, before the always-injected
+    # installed-system --ssh=admin), so the baked hook execs azzioinstall with it.
+    argv = ["--instant", "--final=shutdown", "--final-indication=True"]
+    assert compiler.instant_azzioinstall_args(argv) == [
+        "--instant", "--final=shutdown", "--final-indication=True", "--ssh=admin"]
+
+
+def test_instant_azzioinstall_args_omits_final_indication_when_absent():
+    args = compiler.instant_azzioinstall_args(["--instant", "--final=shutdown"])
+    assert not any(a.startswith("--final-indication") for a in args)
+
+
+def test_final_indication_reaches_the_baked_hook_end_to_end():
+    # THE handoff scenario, end to end: `compile.sh --instant --final=shutdown
+    # --final-indication=True` must bake a boot hook whose exec line carries --final-indication=True.
+    args = compiler.instant_azzioinstall_args(
+        ["--instant", "--final=shutdown", "--final-indication=True"])
+    hook = openbox.instant_install_hook_sh(args)
+    exec_line = next(ln for ln in hook.splitlines() if ln.startswith("exec "))
+    assert "--final-indication=True" in exec_line
+
+
+# --- build-time validation (check_instant_flag) ------------------------------
+
+@pytest.mark.parametrize("good", ["True", "False", "true", "false"])
+def test_check_instant_good_final_indication_ok(good):
+    # Case-insensitive True/False are all accepted (the guest CLI normalises case).
+    assert compiler.check_instant_flag(["--instant", f"--final-indication={good}"]) is None
+
+
+@pytest.mark.parametrize("bad", ["Ture", "yes", "1", "", "on"])
+def test_check_instant_bad_final_indication_is_error(bad):
+    # A typo or non-boolean must fail the COMPILE (not silently at first boot on the target).
+    msg = compiler.check_instant_flag(["--instant", f"--final-indication={bad}"])
+    assert msg, f"--final-indication={bad!r} must error"
+    assert "--final-indication" in msg
+
+
+def test_final_indication_subflag_without_instant_is_error():
+    # Like every other --instant sub-flag, it is meaningless without --instant -> hard error.
+    msg = compiler.check_instant_flag(["--final-indication=True"])
+    assert msg
+    assert "--instant" in msg
+    assert "--final-indication" in msg
+
+
+def test_final_indication_ok_alongside_ssh():
+    # Unlike the two password sub-flags, --final-indication sets no credential, so it is fine
+    # together with --ssh (the common instant+ssh+shutdown ISO wants exactly this combo).
+    assert compiler.check_instant_flag(
+        ["--instant", "--ssh=pw", "--final=shutdown", "--final-indication=True"]) is None
+
+
+# --- the installer render: the install-result marker write -------------------
+
+def test_installer_sh_writes_marker_guarded_on_the_env_var():
+    import installer
+    sh = installer.installer_sh()
+    # The marker write is guarded on AZ_INSTALL_FINAL_INDICATION being (case-insensitively) True.
+    assert 'case "${AZ_INSTALL_FINAL_INDICATION:-False}" in' in sh
+    assert "[tT][rR][uU][eE])" in sh
+    # It writes into the LIVE shared mount (/home/main/Shared); the marker NAME is chosen at
+    # runtime (INSTALL_DONE on success, INSTALL_FAILED on failure) and written via $az_marker.
+    assert 'az_marker="INSTALL_DONE"' in sh
+    assert 'echo "$az_marker"' in sh
+    assert '"/home/main/Shared/$az_marker" 2>/dev/null' in sh
+    # The placeholder must be fully substituted -- no %LIVE_SHARED_DIR% left in the rendered body.
+    assert "%LIVE_SHARED_DIR%" not in sh
+
+
+def test_installer_sh_live_shared_dir_matches_the_module_constant():
+    # The path the installer writes to must be exactly the module's LIVE_SHARED_DIR (the virtiofs
+    # mount system.py exports); a drift would write the marker where the host never looks.
+    import installer
+    assert installer.LIVE_SHARED_DIR == "/home/main/Shared"
+    sh = installer.installer_sh()
+    assert f'{installer.LIVE_SHARED_DIR}/$az_marker' in sh
+    # Both marker paths are cleared before writing so a stale result never lingers.
+    assert f'"{installer.LIVE_SHARED_DIR}/INSTALL_DONE"' in sh
+    assert f'"{installer.LIVE_SHARED_DIR}/INSTALL_FAILED"' in sh
+
+
+def test_marker_written_after_umount_before_final_action():
+    # Timing is the whole point: the marker means "install BODY finished", so it must be written
+    # AFTER `umount -R /mnt` (the last real install step) but BEFORE the --final poweroff/reboot
+    # case (otherwise a shutdown ISO could power off before dropping it, or drop it before the
+    # install finished). Assert the source ordering of the three landmarks.
+    import installer
+    sh = installer.installer_sh()
+    umount_at = sh.index("umount -R /mnt")
+    marker_at = sh.index('az_marker="INSTALL_DONE"')
+    final_at = sh.index('case "${AZ_INSTALL_FINAL:-idle}" in')
+    assert umount_at < marker_at < final_at
+
+
+def test_marker_is_best_effort_non_fatal():
+    # No --shared -> nothing mounted at /home/main/Shared -> the marker is skipped, but the final
+    # action STILL runs. Assert the skip branch exists and does not abort (it just echoes).
+    import installer
+    sh = installer.installer_sh()
+    assert "no shared folder mounted" in sh
+    # The write is redirected with 2>/dev/null and OR'd with an echo -- never a hard failure.
+    assert '> "/home/main/Shared/$az_marker" 2>/dev/null' in sh
+
+
+# --- the marker tells the TRUTH: INSTALL_DONE only when chroot-setup succeeded ---
+# The installer runs under `set -o pipefail` but NOT `set -e`, so a failing arch-chroot would
+# otherwise fall straight through and drop INSTALL_DONE on a BROKEN install -- lying to the host
+# (which reads INSTALL_DONE as "success"). The fix captures the chroot rc into AZ_INSTALL_RC and
+# writes INSTALL_DONE only when it is 0, INSTALL_FAILED otherwise.
+
+def test_chroot_setup_rc_is_captured_not_swallowed():
+    # arch-chroot's exit code must be recorded (the script has no `set -e`, so an unchecked failure
+    # would be invisible). Pin the capture so a refactor can't silently drop it.
+    import installer
+    sh = installer.installer_sh()
+    assert "AZ_INSTALL_RC=0" in sh
+    assert "arch-chroot /mnt /bin/bash /chroot-setup.sh || AZ_INSTALL_RC=$?" in sh
+
+
+def test_marker_name_is_gated_on_the_install_rc():
+    # The marker NAME must branch on AZ_INSTALL_RC: 0 -> INSTALL_DONE (result=ok), else INSTALL_FAILED
+    # (result=fail). This is the whole point -- a shutdown after a broken chroot must NOT look like success.
+    import installer
+    sh = installer.installer_sh()
+    assert 'if [ "${AZ_INSTALL_RC:-0}" -eq 0 ]; then' in sh
+    assert 'az_marker="INSTALL_DONE"; az_result="ok"' in sh
+    assert 'az_marker="INSTALL_FAILED"; az_result="fail"' in sh
+    # The rc itself is recorded in the marker body so the host can see WHY it failed.
+    assert 'echo "rc=${AZ_INSTALL_RC:-0}"' in sh
+
+
+def _run_marker_block(final_indication, rc, tmp_path):
+    """Execute JUST the final-indication marker block of installer_sh() against a fake shared dir,
+    with a chosen AZ_INSTALL_RC, and return the list of files it left in the shared dir. We slice
+    from the `case "${AZ_INSTALL_FINAL_INDICATION...` line to just before the POST-INSTALL ACTION
+    case so no real poweroff/umount runs -- pure, hermetic, no VM."""
+    import re
+    import subprocess
+    import installer
+    sh = installer.installer_sh()
+    start = sh.index('# FINAL INDICATION')
+    end = sh.index('# POST-INSTALL ACTION')
+    block = sh[start:end]
+    shared = tmp_path / "shared"
+    shared.mkdir(exist_ok=True)   # helper may be called twice with one tmp_path
+    # Point the hardcoded /home/main/Shared at our tmp dir for the duration of the block.
+    block = block.replace("/home/main/Shared", str(shared))
+    script = (
+        f'set -o pipefail\n'
+        f'AZ_INSTALL_FINAL_INDICATION={final_indication!r}\n'
+        f'AZ_INSTALL_RC={rc}\n'
+        f'RED=""; LIGHT_BLUE=""; RESET=""\n'
+        f'{block}\n'
+    )
+    subprocess.run(["bash", "-c", script], check=True, timeout=20,
+                   capture_output=True, text=True)
+    return sorted(p.name for p in shared.iterdir())
+
+
+def test_marker_block_writes_install_done_on_success(tmp_path):
+    files = _run_marker_block("True", 0, tmp_path)
+    assert files == ["INSTALL_DONE"]
+
+
+def test_marker_block_writes_install_failed_on_failure(tmp_path):
+    # A non-zero chroot rc must yield INSTALL_FAILED, NOT INSTALL_DONE -- the bug the adversary found.
+    files = _run_marker_block("True", 1, tmp_path)
+    assert files == ["INSTALL_FAILED"]
+
+
+def test_marker_block_writes_nothing_when_indication_false(tmp_path):
+    # Default False -> no marker at all, regardless of rc.
+    assert _run_marker_block("False", 0, tmp_path) == []
+    assert _run_marker_block("False", 1, tmp_path) == []
+
+
+def test_marker_block_install_done_body_reports_ok(tmp_path):
+    import subprocess
+    import installer
+    sh = installer.installer_sh()
+    block = sh[sh.index('# FINAL INDICATION'):sh.index('# POST-INSTALL ACTION')]
+    shared = tmp_path / "shared"; shared.mkdir()
+    block = block.replace("/home/main/Shared", str(shared))
+    script = (f'set -o pipefail\nAZ_INSTALL_FINAL_INDICATION="True"\nAZ_INSTALL_RC=0\n'
+              f'RED=""; LIGHT_BLUE=""; RESET=""\n{block}\n')
+    subprocess.run(["bash", "-c", script], check=True, timeout=20, capture_output=True, text=True)
+    body = (shared / "INSTALL_DONE").read_text()
+    assert body.splitlines()[0] == "INSTALL_DONE"
+    assert "result=ok" in body
+    assert "rc=0" in body

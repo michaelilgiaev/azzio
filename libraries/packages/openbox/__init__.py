@@ -1794,10 +1794,19 @@ Usage: azzioinstall [ -g | -c | -a [instant-options] | --cli --disk <dev> ] [ -h
                                    to a shell; reboot (alias restart) = reboot into the
                                    freshly installed system; shutdown = power the machine
                                    off.
+        --final-indication=True|False
+                                   False (default): do nothing extra. True: once the install
+                                   body completes (just before the --final action), write a
+                                   Shared/INSTALL_DONE marker into the live session's
+                                   host<->guest shared folder, so the HOST can confirm the
+                                   unattended install succeeded -- essential with
+                                   --final=shutdown, where self-poweroff and a crash look the
+                                   same from outside. No-op if no shared folder is mounted.
       Example:
         azzioinstall --instant --disk=sda --hostname=box --username=me \
           --username-password=secret --share-username-root-password=False \
-          --root-password=rootsecret --timezone=Europe/London --final=reboot
+          --root-password=rootsecret --timezone=Europe/London --final=shutdown \
+          --final-indication=True
 
   --cli --disk <dev>  Use /dev/<dev> (e.g. sda, nvme0n1) as the target instead of asking
                       which disk. Only meaningful with --cli (--instant uses --disk=<dev>).
@@ -1818,7 +1827,8 @@ environment directly (the --instant sub-flags are the friendly front-end for the
 Recognised: AZ_INSTALL_DISK, AZ_INSTALL_HOSTNAME, AZ_INSTALL_USERNAME, AZ_INSTALL_FULLNAME,
 AZ_INSTALL_PASSWORD, AZ_INSTALL_ROOT_PASSWORD, AZ_INSTALL_TIMEZONE, AZ_INSTALL_FILESYSTEM
 (ext4 default, or btrfs), AZ_INSTALL_CHOICE, AZ_INSTALL_SSH (ssh on the installed system;
-the --ssh sub-flag sets it), and AZ_INSTALL_FINAL (idle/reboot/shutdown).
+the --ssh sub-flag sets it), AZ_INSTALL_FINAL (idle/reboot/shutdown), and
+AZ_INSTALL_FINAL_INDICATION (True/False; the --final-indication sub-flag sets it).
 Any prompt left un-seeded is asked interactively.
 EOF
 }}
@@ -1877,6 +1887,7 @@ run_cli() {{
         ${{AZ_INSTALL_STAR_PASSWORD:+"AZ_INSTALL_STAR_PASSWORD=$AZ_INSTALL_STAR_PASSWORD"}} \\
         ${{AZ_INSTALL_SSH:+"AZ_INSTALL_SSH=$AZ_INSTALL_SSH"}} \\
         ${{AZ_INSTALL_FINAL:+"AZ_INSTALL_FINAL=$AZ_INSTALL_FINAL"}} \\
+        ${{AZ_INSTALL_FINAL_INDICATION:+"AZ_INSTALL_FINAL_INDICATION=$AZ_INSTALL_FINAL_INDICATION"}} \\
         bash '{INSTALL_CLI_SCRIPT_PATH}'
 }}
 
@@ -1962,6 +1973,23 @@ run_auto() {{
            usage >&2; exit 2 ;;
     esac
     export AZ_INSTALL_FINAL="$az_final"
+
+    # Final indication. Default "False" keeps today's behaviour (no marker file). "True" makes the
+    # scripted installer drop Shared/INSTALL_DONE into the live session's host<->guest shared folder
+    # once the install body completes (just before the --final action), so a HOST watching the
+    # exported `shared/` dir can conclude the unattended install succeeded -- indispensable for a
+    # `--final=shutdown` ISO, where self-poweroff and a mid-install crash look identical from outside.
+    # Normalised to exactly "True"/"False" (case-insensitively) so the installer's [tT][rR][uU][eE]
+    # match is all it needs; a typo like --final-indication=Tru is rejected here rather than silently
+    # treated as False (which would leave the host waiting on a marker that never comes).
+    az_final_indication="${{az_opt_final_indication:-False}}"
+    case "$az_final_indication" in
+        [tT][rR][uU][eE])   az_final_indication=True ;;
+        [fF][aA][lL][sS][eE]) az_final_indication=False ;;
+        *) echo "azzioinstall: --final-indication must be True or False (got '$az_final_indication')" >&2
+           usage >&2; exit 2 ;;
+    esac
+    export AZ_INSTALL_FINAL_INDICATION="$az_final_indication"
     run_cli
 }}
 
@@ -2021,6 +2049,8 @@ while [ $# -gt 0 ]; do
         --ssh=*) az_opt_ssh="${{1#--ssh=}}" ;;
         --final) require_value "$@"; shift; az_opt_final="$1"; az_seen_auto_flag=1 ;;
         --final=*) az_opt_final="${{1#--final=}}"; az_seen_auto_flag=1 ;;
+        --final-indication) require_value "$@"; shift; az_opt_final_indication="$1"; az_seen_auto_flag=1 ;;
+        --final-indication=*) az_opt_final_indication="${{1#--final-indication=}}"; az_seen_auto_flag=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "azzioinstall: unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -2042,6 +2072,7 @@ if [ "$mode" != "auto" ] && [ -n "$az_seen_auto_flag" ]; then
     [ -n "$az_opt_root_password" ] && az_bad="$az_bad --root-password"
     [ -n "$az_opt_timezone" ] && az_bad="$az_bad --timezone"
     [ -n "$az_opt_final" ] && az_bad="$az_bad --final"
+    [ -n "$az_opt_final_indication" ] && az_bad="$az_bad --final-indication"
     # --disk is allowed alongside --cli; only flag it here if --disk was given without --cli either.
     [ -n "$az_opt_disk" ] && [ "$mode" != "cli" ] && az_bad="$az_bad --disk"
     if [ -n "$az_bad" ]; then

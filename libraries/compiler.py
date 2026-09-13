@@ -243,6 +243,7 @@ INSTANT_SUBFLAGS = (
     "--root-password",
     "--timezone",
     "--final",
+    "--final-indication",
 )
 
 # The sub-flags that set an actual PASSWORD, which the --ssh password already governs. These are
@@ -262,6 +263,14 @@ INSTANT_IDENTITY_SUBFLAGS_CONFLICTING_WITH_SSH = (
 # azzioinstall's run_auto: idle (default), reboot/restart (alias), shutdown. Validated at build
 # time so a typo (`--final=restrat`) fails the COMPILE, not silently at first boot on the target.
 INSTANT_FINAL_VALUES = ("idle", "reboot", "restart", "shutdown")
+
+# Accepted values for --final-indication (whether the unattended install drops a Shared/INSTALL_DONE
+# marker into the host<->guest shared folder once the install body completes -- so the HOST can
+# confirm success, indispensable with --final=shutdown). Mirrors azzioinstall's run_auto: True /
+# False (case-insensitive there; validated case-insensitively here too so --final-indication=true
+# is accepted). Default is False. Validated at build time so a typo (`--final-indication=Ture`)
+# fails the COMPILE, not silently at first boot on the target.
+INSTANT_FINAL_INDICATION_VALUES = ("true", "false")
 
 
 def instant_flag_present(argv: list[str]) -> bool:
@@ -333,6 +342,7 @@ def check_instant_flag(argv: list[str]) -> str | None:
          password already governs that credential, so setting it again via --instant is
          contradictory. --username / --share-username-root-password set no password and are fine.
       3. --final, if given, must be one of INSTANT_FINAL_VALUES (a typo must fail the compile).
+      3b. --final-indication, if given, must be True/False (INSTANT_FINAL_INDICATION_VALUES).
       4. A sub-flag azzioinstall needs non-empty (everything except... all of them, really) must
          not be blank: `--username=` etc. is a hard error (an empty override is never intended).
     """
@@ -377,6 +387,14 @@ def check_instant_flag(argv: list[str]) -> str | None:
         return (
             f"--final={final} is not a valid post-install action. Choose one of: "
             f"{', '.join(INSTANT_FINAL_VALUES)}."
+        )
+
+    # Rule 3b: --final-indication, if given, must be True or False (case-insensitive).
+    final_indication = parse_instant_subflag(argv, "--final-indication")
+    if final_indication is not None and final_indication.lower() not in INSTANT_FINAL_INDICATION_VALUES:
+        return (
+            f"--final-indication={final_indication} is not valid. Choose True or False "
+            f"(whether to write Shared/INSTALL_DONE when the unattended install completes)."
         )
 
     return None
