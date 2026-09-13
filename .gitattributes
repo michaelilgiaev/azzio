@@ -1,2 +1,4 @@
 documentations/** linguist-generated=true
 libraries/modifications/ckbcomp.py linguist-vendored=true
+libraries/packages/file_manager/source/** linguist-vendored=true
+libraries/packages/image_viewer/source/** linguist-vendored=true
