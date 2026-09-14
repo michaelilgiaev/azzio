@@ -281,6 +281,15 @@ def instant_flag_present(argv: list[str]) -> bool:
     return any(t == "--instant" or t.startswith("--instant=") for t in argv)
 
 
+def logs_flag_present(argv: list[str]) -> bool:
+    """True if the operator wrote the `--logs` flag AT ALL (bare `--logs`, or the `--logs=` /
+    `--logs=anything` forms). Like --instant it is a BOOLEAN carrying no value, so any `--logs...`
+    token counts as "tee the install to Shared/install.log". It is NOT an INSTANT_SUBFLAG (those
+    are all --name=value); it is a fixed property of the instant medium, appended to the baked
+    azzioinstall command by instant_azzioinstall_args. A token like `--logsfoo` is NOT the flag."""
+    return any(t == "--logs" or t.startswith("--logs=") for t in argv)
+
+
 def parse_instant_subflag(argv: list[str], name: str) -> str | None:
     """Pull the value of an --instant sub-flag (`--<name>=<value>`) out of argv, or None if the
     sub-flag is absent. `name` is the full flag INCLUDING its leading dashes (e.g. "--username").
@@ -326,6 +335,12 @@ def instant_azzioinstall_args(argv: list[str]) -> list[str]:
             args.append(f"{name}={value}")
     if not any(a == "--ssh" or a.startswith("--ssh=") for a in args):
         args.append("--ssh=admin")
+    # --logs is a boolean baked property (not an INSTANT_SUBFLAG value-flag): when the operator
+    # passed the compiler-level --logs, append the bare azzioinstall sub-flag --logs so the
+    # instant ISO's unattended install tees itself to Shared/install.log. Appended last, once, so
+    # the baked command is stable and it is never doubled.
+    if logs_flag_present(argv) and "--logs" not in args:
+        args.append("--logs")
     return args
 
 
@@ -355,6 +370,17 @@ def check_instant_flag(argv: list[str]) -> str | None:
             f"these options require --instant:{''.join(' ' + p for p in present)}. "
             f"They tune the unattended install the instant ISO runs, so they only mean "
             f"something when --instant selects that ISO. Add --instant, or drop {joined}."
+        )
+
+    # Rule 1b: --logs likewise requires --instant. It bakes `azzioinstall --logs` into the
+    # instant medium's boot hook, so without --instant there is no hook to bake it into -- a
+    # silent no-op the operator would mistake for "logs are on". Checked BEFORE the no-instant
+    # early return below (that return would otherwise swallow a lone --logs).
+    if logs_flag_present(argv) and not instant_flag_present(argv):
+        return (
+            "--logs requires --instant. It tees the unattended install the instant ISO runs to "
+            "Shared/install.log, so it only means something when --instant selects that ISO. "
+            "Add --instant, or drop --logs."
         )
 
     if not instant_flag_present(argv):

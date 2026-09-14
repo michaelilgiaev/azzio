@@ -289,6 +289,15 @@ class Config:
         the user can see and hand-remove any leftover if they ever need to."""
         return os.path.join(self.dir, "virtiofs.sock")
 
+    @property
+    def virtiofs_pidfile(self) -> str:
+        """The pid file _spawn_virtiofsd writes for the running virtiofsd daemon
+        (virtiofs.sock.pid, beside the socket). Runtime artifact -- created on `run`
+        and removed on teardown -- so an external watcher can find the daemon pid
+        without scanning the process table, and it is part of the codelis cache
+        layout. Derived, not stored, exactly like the socket paths."""
+        return os.path.join(self.dir, "virtiofs.sock.pid")
+
     @classmethod
     def from_cwd(cls) -> "Config":
         d = os.getcwd()

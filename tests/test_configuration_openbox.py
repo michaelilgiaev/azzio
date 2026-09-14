@@ -268,7 +268,7 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
         'HOST=${AZ_INSTALL_HOSTNAME-} USER=${AZ_INSTALL_USERNAME-} '
         'FULL=[${AZ_INSTALL_FULLNAME-}] TZ=${AZ_INSTALL_TIMEZONE-} FS=${AZ_INSTALL_FILESYSTEM-} '
         'PW=${AZ_INSTALL_PASSWORD-} ROOTPW=${AZ_INSTALL_ROOT_PASSWORD-} '
-        'FINAL=${AZ_INSTALL_FINAL-} SSH=${AZ_INSTALL_SSH-} '
+        'FINAL=${AZ_INSTALL_FINAL-} SSH=${AZ_INSTALL_SSH-} LOGS=${AZ_INSTALL_LOGS-} '
         'STAR=${AZ_INSTALL_STAR_PASSWORD-}"; exit 0; }\n    exec true \\',
         1,
     ).replace("if ! sudo test -r", "if ! true && ! sudo test -r")
@@ -366,6 +366,24 @@ def test_install_wrapper_auto_behaviour_end_to_end(tmp_path):
     # --ssh WITHOUT --instant or --cli (bare invocation) is rejected: it only means something for
     # an install mode.
     r = run(["--ssh=x"])
+    assert r.returncode == 2 and "requires --instant or --cli" in r.stderr, (r.returncode, r.stderr)
+
+    # --logs (boolean): off by default, on when given, forwarded as AZ_INSTALL_LOGS=1.
+    r = run(["--instant"])
+    assert f(r.stdout, "LOGS") == "", r.stdout            # default off
+    r = run(["--instant", "--logs"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "LOGS") == "1", r.stdout           # bare --logs -> on
+    r = run(["--instant", "--logs=1"])
+    assert f(r.stdout, "LOGS") == "1", r.stdout           # --logs=anything -> on
+
+    # --logs works with --cli too (reaches run_cli directly, not via run_auto): forwarded, rc 0.
+    r = run(["--cli", "--logs"])
+    assert r.returncode == 0, r.stderr
+    assert f(r.stdout, "LOGS") == "1", r.stdout
+
+    # --logs WITHOUT --instant or --cli (bare invocation) is rejected, like --ssh.
+    r = run(["--logs"])
     assert r.returncode == 2 and "requires --instant or --cli" in r.stderr, (r.returncode, r.stderr)
 
     # missing value errors.

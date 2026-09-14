@@ -31,6 +31,11 @@ if __package__:
     )
     from .graphics import select_render_node
     from .qemu_command import build_qemu_argv  # re-exported: do_run + tests use vm.build_qemu_argv
+    # Host-wide `ls` enumeration lives in vm_instances (split for size + concern). Re-exported
+    # so vm.do_ls / vm._running_instances / vm._cfg_ssh_port / vm._pid_cwd still resolve here.
+    from .vm_instances import (
+        do_ls, _running_instances, _scan_proc_table, _pid_cwd, _cfg_ssh_port,
+    )
 else:  # loaded flat (run by absolute path via the launcher) -- no parent package
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import checks  # noqa: E402  (after the sys.path bootstrap above)
@@ -41,6 +46,11 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
     )
     from graphics import select_render_node  # noqa: E402
     from qemu_command import build_qemu_argv  # noqa: E402  re-exported
+    # Host-wide `ls` enumeration lives in vm_instances (split for size + concern). Re-exported
+    # so vm.do_ls / vm._running_instances / vm._cfg_ssh_port / vm._pid_cwd still resolve here.
+    from vm_instances import (  # noqa: E402
+        do_ls, _running_instances, _scan_proc_table, _pid_cwd, _cfg_ssh_port,
+    )
 
 
 
@@ -204,15 +214,22 @@ def _auto_install_iso(cfg: Config, requested: str, disk: str) -> str:
 
 
 # --- run ---------------------------------------------------------------------
-def do_run(cfg: Config, install_iso: str = "") -> None:
+def do_run(cfg: Config, install_iso: str = "", headless: bool = False) -> None:
     """Assemble and launch the QEMU VM, then a remote-viewer window against it.
     Closing that window (or Ctrl-C) tears the whole VM down. cfg.disk is the
-    already-resolved .qcow2 the caller demanded on the command line."""
+    already-resolved .qcow2 the caller demanded on the command line.
+
+    headless=True boots the VM with NO viewer window: QEMU (and virtiofsd) still
+    run and QEMU still creates the SPICE socket -- so a `hypervisor view` can
+    attach later -- but we never spawn remote-viewer and we block on QEMU (+
+    virtiofsd) alone. This is the unattended path codelis uses to run the ISO's
+    auto-install without a display; remote-viewer is not even required then."""
     checks.require_writable_dir(cfg)
     checks.require_qemu()
     checks.require_ovmf(cfg)
     checks.require_kvm()
-    checks.require_viewer()
+    if not headless:
+        checks.require_viewer()
     checks.require_not_running(cfg)
 
     hcfg = cfg.hcfg
@@ -268,7 +285,7 @@ def do_run(cfg: Config, install_iso: str = "") -> None:
         print(" ".join(_shquote(a) for a in qemu))
         return
 
-    _launch(cfg, qemu, port)
+    _launch(cfg, qemu, port, headless=headless)
 
 
 def _gpu_args(cfg: Config) -> list[str]:
@@ -360,12 +377,52 @@ def _tty_restore(saved: "tuple[int, list] | None") -> None:
         pass
 
 
-def _launch(cfg: Config, qemu: list[str], port: "int | None") -> None:
+def _spawn_viewer(cfg: Config) -> "subprocess.Popen":
+    """Spawn remote-viewer against the VM's SPICE socket and return the process.
+
+    Shared by _launch (the windowed boot) and do_view (attach to an already-running
+    VM), so the viewer arg-building, DISPLAY override and the stdin=DEVNULL tty fix
+    live in ONE place. Default is a maximized, WM-decorated window with a known
+    title; hcfg.fullscreen opts into borderless exclusive fullscreen instead.
+    --auto-resize=always keeps the guest following the window size (needs guest
+    spice-vdagent). HYPERVISOR_VIEWER_DISPLAY pins which X display the viewer maps on.
+
+    stdin=DEVNULL is the source-side half of the tty fix: remote-viewer links libvte,
+    which -- given a controlling tty on stdin -- puts it into raw mode and (when killed
+    on teardown) leaves it -echo/-icanon, mangling the shell. Handing it /dev/null means
+    it has no terminal to corrupt; _tty_restore in cleanup is the belt-and-braces second
+    half for anything that still slips through."""
+    hcfg = cfg.hcfg
+    title = f"hypervisor: {cfg.vm}"
+    if hcfg.fullscreen:
+        view_args = ["--full-screen", "--auto-resize=always"]
+    else:
+        view_args = ["--auto-resize=always", "--title", title]
+    viewer_env = os.environ.copy()
+    viewer_display = os.environ.get("HYPERVISOR_VIEWER_DISPLAY")
+    if viewer_display:
+        viewer_env["DISPLAY"] = viewer_display
+    if not hcfg.fullscreen:
+        _maximize_window(title, display=viewer_display)
+    return subprocess.Popen(
+        ["remote-viewer", *view_args, f"spice+unix://{cfg.spice_sock}"],
+        env=viewer_env,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def _launch(cfg: Config, qemu: list[str], port: "int | None",
+            headless: bool = False) -> None:
     hcfg = cfg.hcfg
     """Boot QEMU, wait for the SPICE socket, launch the viewer; whichever dies
     first tears the other down. Mirrors run.sh's trap-based lifecycle. A
     ConfigWatcher runs alongside, applying live hypervisor.cfg edits and reverting
-    invalid ones."""
+    invalid ones.
+
+    headless=True skips the viewer entirely (no remote-viewer, no window maximize)
+    and blocks on QEMU (+ virtiofsd) alone -- QEMU still creates the SPICE socket so
+    `hypervisor view` can attach later. cleanup() is unchanged: viewer_proc stays None,
+    which the kill loop and _wait_any both tolerate."""
     qemu_proc: subprocess.Popen | None = None
     viewer_proc: subprocess.Popen | None = None
     virtiofsd_proc: subprocess.Popen | None = None
@@ -403,6 +460,7 @@ def _launch(cfg: Config, qemu: list[str], port: "int | None") -> None:
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         _rm(cfg.spice_sock)
         _rm_sock(cfg.virtiofs_sock)
+        _rm(cfg.virtiofs_pidfile)
         # LAST: undo any terminal corruption a child (remote-viewer/VTE) left behind.
         # Runs on every teardown path because they all funnel through cleanup().
         _tty_restore(saved_tty)
@@ -430,7 +488,9 @@ def _launch(cfg: Config, qemu: list[str], port: "int | None") -> None:
 
         qemu_proc = subprocess.Popen(qemu)
 
-        # wait for the SPICE socket, then launch our own viewer against it
+        # wait for the SPICE socket, then launch our own viewer against it (unless
+        # headless -- QEMU still CREATES the socket either way, so `hypervisor view`
+        # can attach to a headless VM later; we just do not open a window here).
         for _ in range(100):
             if os.path.exists(cfg.spice_sock):
                 break
@@ -438,33 +498,11 @@ def _launch(cfg: Config, qemu: list[str], port: "int | None") -> None:
                 die("QEMU exited before the SPICE socket appeared (see errors above)")
             time.sleep(0.1)
 
-        # Default: a normal, MAXIMIZED window (WM-decorated, on the taskbar).
-        # remote-viewer has no --maximize flag, so we open a plain window with a
-        # known title and let the window manager maximize it once it maps (see
-        # _maximize_window). --auto-resize=always keeps the guest following the
-        # window size (needs guest spice-vdagent). fullscreen=true in
-        # hypervisor.cfg opts into borderless exclusive fullscreen instead.
-        title = f"hypervisor: {cfg.vm}"
-        if hcfg.fullscreen:
-            view_args = ["--full-screen", "--auto-resize=always"]
-        else:
-            view_args = ["--auto-resize=always", "--title", title]
-        viewer_env = os.environ.copy()
-        viewer_display = os.environ.get("HYPERVISOR_VIEWER_DISPLAY")
-        if viewer_display:
-            viewer_env["DISPLAY"] = viewer_display
-        if not hcfg.fullscreen:
-            _maximize_window(title, display=viewer_display)
-        # stdin=DEVNULL is the source-side half of the tty fix: remote-viewer links
-        # libvte, which -- given a controlling tty on stdin -- puts it into raw mode and
-        # (when killed on teardown) leaves it -echo/-icanon, mangling the shell. Handing
-        # it /dev/null means it has no terminal to corrupt; _tty_restore in cleanup is the
-        # belt-and-braces second half for anything that still slips through.
-        viewer_proc = subprocess.Popen(
-            ["remote-viewer", *view_args, f"spice+unix://{cfg.spice_sock}"],
-            env=viewer_env,
-            stdin=subprocess.DEVNULL,
-        )
+        # A normal, MAXIMIZED (or fullscreen) window, built by the shared _spawn_viewer
+        # helper. Skipped entirely when headless: no window, no _maximize_window, and
+        # viewer_proc stays None (the cleanup kill loop and _wait_any both tolerate that).
+        if not headless:
+            viewer_proc = _spawn_viewer(cfg)
 
         # Watch hypervisor.cfg for live edits: valid ones are applied/logged,
         # invalid ones are reverted to the file we booted with.
@@ -511,6 +549,12 @@ def _spawn_virtiofsd(cfg: Config) -> "subprocess.Popen | None":
     print(f"Starting virtiofsd for shared folder: {cfg.shared_path}",
           file=sys.stderr)
     proc = subprocess.Popen(argv)
+    # Record the daemon's pid beside its socket (virtiofs.sock.pid). It is a runtime
+    # artifact -- created here, removed in cleanup() with the socket -- so a warm VM dir
+    # carries it (the codelis cache layout lists it) and any external watcher can find
+    # the daemon without re-scanning the process table. Best-effort: a dir we cannot write
+    # to must not abort the boot.
+    _write_pidfile(cfg.virtiofs_pidfile, proc.pid)
     for _ in range(100):  # up to ~10s for the socket to appear
         if os.path.exists(cfg.virtiofs_sock):
             return proc
@@ -519,6 +563,16 @@ def _spawn_virtiofsd(cfg: Config) -> "subprocess.Popen | None":
                 "cannot be mounted (see errors above)")
         time.sleep(0.1)
     return proc
+
+
+def _write_pidfile(path: str, pid: int) -> None:
+    """Write `pid` to `path` (the virtiofsd pid file). Best-effort -- an unwritable
+    dir simply leaves no pid file rather than failing the VM boot."""
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(f"{pid}\n")
+    except OSError:
+        pass
 
 
 def _rm_sock(path: str) -> None:
@@ -764,6 +818,40 @@ def do_stop(cfg: Config) -> None:
         print(f"Sent power-off to VM '{cfg.vm}'.")
     else:
         print(f"VM '{cfg.vm}' is not running.")
+
+
+# --- ls: every running VM on the host ----------------------------------------
+# The enumeration backend (_scan_proc_table, _pid_cwd, _cfg_ssh_port,
+# _running_instances, do_ls) lives in vm_instances.py -- host-wide discovery is a
+# separate concern from this module's single-VM lifecycle, and splitting it holds this
+# file's size down. They are re-imported at the top of this module so vm.do_ls and the
+# vm._running_instances / vm._cfg_ssh_port / vm._pid_cwd names still resolve here.
+
+
+# --- view: attach a viewer to THIS dir's running VM --------------------------
+def do_view(cfg: Config) -> None:
+    """Open a remote-viewer window on this directory's already-running VM and BLOCK on
+    it. Attach-only: closing the window leaves the VM running (unlike `run`, whose
+    viewer close tears the VM down). Refuses when remote-viewer is missing, the VM is
+    not running, or its SPICE socket is absent."""
+    checks.require_viewer()
+    if not is_running(cfg):
+        die(f"VM '{cfg.vm}' is not running -- start it with 'hypervisor run' first.")
+    if not os.path.exists(cfg.spice_sock):
+        die(f"no SPICE socket for VM '{cfg.vm}' at {cfg.spice_sock} -- "
+            "is it running headless without a socket yet?")
+    print(f"Attaching viewer to VM '{cfg.vm}' (closing the window leaves it running).",
+          file=sys.stderr)
+    viewer_proc = _spawn_viewer(cfg)
+    try:
+        viewer_proc.wait()
+    except KeyboardInterrupt:
+        # Ctrl-C detaches the viewer only; the VM keeps running (attach semantics).
+        if viewer_proc.poll() is None:
+            try:
+                viewer_proc.kill()
+            except OSError:
+                pass
 
 
 # --- small shell/OS helpers --------------------------------------------------
