@@ -48,10 +48,16 @@ USAGE:
                              Create disk + UEFI NVRAM + hypervisor.cfg (does NOT
                              boot). The ISO argument is REQUIRED. Flags set the
                              matching hypervisor.cfg toggles on.
-  hypervisor run <file.qcow2> [--iso <file.iso>]
+  hypervisor run <file.qcow2> [--iso <file.iso>] [--headless]
                              Boot the named disk (REQUIRED). --iso attaches an
                              installer ISO for repair or first-time install. An
                              EMPTY disk auto-attaches the dir's single ISO.
+                             --headless boots with NO viewer window (SPICE stays
+                             up, so `hypervisor view` can attach later).
+  hypervisor ls              List every RUNNING hypervisor VM on this host
+                             (name, pid, directory, SSH port).
+  hypervisor view            Open a viewer window on THIS dir's running VM
+                             (attach only -- closing it leaves the VM running).
   hypervisor share [--offline]
                              Print commands to mount the host ./shared folder
                              inside the guest. --offline edits the powered-off
@@ -111,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
             vm.do_install(cfg, *_parse_install_args(rest))
         elif cmd == "run":
             _dispatch_run(cfg, rest)
+        elif cmd == "ls":
+            vm.do_ls(cfg)
+        elif cmd == "view":
+            vm.do_view(cfg)
         elif cmd == "share":
             vm.do_share(cfg, rest[0] if rest else "")
         elif cmd == "status":
@@ -224,12 +234,18 @@ def _dispatch_run(cfg: Config, rest: list[str]) -> None:
     disk = cfg.resolve_run_disk(disk_arg)
     cfg = cfg.__class__(**{**cfg.__dict__, "disk": disk})
 
+    # --headless: boot the VM with NO remote-viewer window (the unattended cache-build
+    # path codelis drives). QEMU still creates the SPICE socket, so a later
+    # `hypervisor view` can attach; we just never spawn our own viewer and block on
+    # QEMU (+ virtiofsd) alone. Accepted with or without a value form for symmetry.
+    headless = any(t == "--headless" or t.startswith("--headless=") for t in rest)
+
     iso_arg = _flag_value(rest, "--iso")
     if "--iso" in rest or iso_arg:
         iso = cfg.resolve_iso(iso_arg) if iso_arg else cfg.resolve_iso(os.environ.get("ISO", ""))
-        vm.do_run(cfg, install_iso=iso)
+        vm.do_run(cfg, install_iso=iso, headless=headless)
     else:
-        vm.do_run(cfg)
+        vm.do_run(cfg, headless=headless)
 
 
 def _flag_value(rest: list[str], flag: str) -> str:

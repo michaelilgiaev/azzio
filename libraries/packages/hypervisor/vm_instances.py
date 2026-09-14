@@ -1,0 +1,126 @@
+"""Host-wide hypervisor VM enumeration -- the `hypervisor ls` backend.
+
+Split out of virtual_machine.py: everything here is about discovering EVERY running
+hypervisor VM on the host (system-wide), which is a different concern from the
+single-VM boot/attach/teardown lifecycle that virtual_machine.py owns. Keeping it
+here holds virtual_machine.py's size down and isolates the /proc-scanning logic.
+
+The one impure edge (reading /proc) is factored into _scan_proc_table / _pid_cwd so
+the record-building logic (_running_instances) stays PURE and unit-testable with a
+fake process table. virtual_machine.py re-imports these names, so `vm.do_ls`,
+`vm._running_instances`, `vm._cfg_ssh_port` and `vm._pid_cwd` all still resolve for
+the CLI dispatch and the existing tests.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+# Dual-mode sibling import, mirroring virtual_machine.py: package-relative when loaded
+# as packages.hypervisor.* (the test suite), bare + a sys.path bootstrap when loaded flat
+# by absolute path (the launcher execs command_line_interface.py, which drags siblings in
+# flat). The bootstrap line below is REQUIRED by
+# test_dual_mode_sibling_imports_have_a_flat_fallback (every relative-importing pkg module
+# must carry its own flat fallback).
+if __package__:
+    from .configuration import (
+        DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
+    )
+else:  # loaded flat -- no parent package
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from configuration import (  # noqa: E402
+        DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
+    )
+
+
+def _scan_proc_table() -> list:
+    """Read the LIVE process table as a list of (pid, comm) pairs from /proc.
+
+    Impure (touches /proc), factored out so _running_instances -- the logic that
+    turns the table into VM records -- stays PURE and unit-testable with a fake
+    table. A vanished pid between listdir and read is skipped (a race is harmless)."""
+    out = []
+    try:
+        pids = [n for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
+        return out
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as fh:
+                comm = fh.read().strip()
+        except OSError:
+            continue
+        out.append((int(pid), comm))
+    return out
+
+
+def _pid_cwd(pid: int) -> str:
+    """The working directory of `pid` (readlink /proc/<pid>/cwd), or '' if gone.
+    A VM's dir IS its identity, so this is how `ls` recovers WHERE each VM lives."""
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+
+
+def _cfg_ssh_port(directory: str) -> "int | None":
+    """The forwarded ssh port a VM dir advertises: read ssh / the port straight from
+    its hypervisor.cfg (NOT select_ssh_port, which would BUMP past the now-busy port a
+    running VM already holds and report a wrong number). None when ssh is off or the
+    cfg is unreadable. PURE except for the single file read."""
+    path = os.path.join(directory, _HYPERVISOR_CFG_NAME)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            raw = parse_conf_text(fh.read())
+    except OSError:
+        return None
+    ssh = raw.get("ssh", "").strip().lower()
+    if ssh not in ("true", "1", "yes", "on"):
+        return None
+    port = raw.get("ssh_guest_to_host_port_forward", "").strip()
+    if port.isdigit():
+        return int(port)
+    return DEFAULT_SSH_FORWARD_PORT
+
+
+def _running_instances(proc_table: "list | None" = None) -> list:
+    """Every RUNNING hypervisor VM on the host, as a list of dicts
+    {vm, pid, dir, ssh_port} sorted by vm name. PURE given a proc_table (defaults to
+    the live one via _scan_proc_table) so tests drive it with a fake table.
+
+    A hypervisor VM's QEMU is launched `-name {vm},process={proc}` where proc is
+    f"{slug}-vm" capped to 15 chars, so its comm ENDS in "-vm" (the cap never eats the
+    suffix: "-vm" is 3 chars, well inside 15). We match those, recover each VM's dir
+    from /proc/<pid>/cwd, derive the vm name from the dir basename (authoritative --
+    the 15-char comm may be truncated), and read the ssh port from that dir's cfg."""
+    if proc_table is None:
+        proc_table = _scan_proc_table()
+    instances = []
+    for pid, comm in proc_table:
+        if not comm.endswith("-vm"):
+            continue
+        directory = _pid_cwd(pid)
+        if not directory:
+            continue
+        vm_name = _slugify(os.path.basename(directory))
+        instances.append({
+            "vm": vm_name,
+            "pid": pid,
+            "dir": directory,
+            "ssh_port": _cfg_ssh_port(directory),
+        })
+    return sorted(instances, key=lambda i: (i["vm"], i["pid"]))
+
+
+def do_ls(cfg) -> None:
+    """List every running hypervisor VM on the host (system-wide, NOT just this dir).
+    cfg is accepted for a uniform subcommand signature but unused -- `ls` is global."""
+    instances = _running_instances()
+    if not instances:
+        print("No hypervisor VMs are running.")
+        return
+    print(f"{'VM':<20} {'PID':>7}  {'SSH':>7}  DIRECTORY")
+    for inst in instances:
+        ssh = str(inst["ssh_port"]) if inst["ssh_port"] is not None else "-"
+        print(f"{inst['vm']:<20} {inst['pid']:>7}  {ssh:>7}  {inst['dir']}")

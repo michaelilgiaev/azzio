@@ -59,6 +59,21 @@ set -o pipefail
 
 cd /
 
+# INSTALL LOGS (`azzioinstall --logs`, forwarded as AZ_INSTALL_LOGS=1). When on AND the live
+# host<->guest shared folder is present, tee EVERYTHING from here on -- stdout AND stderr -- to
+# %LIVE_SHARED_DIR%/install.log, so the HOST can read exactly what an unattended install did
+# (it lands beside the INSTALL_DONE marker written near the end). Best-effort and NON-FATAL,
+# mirroring the marker block's guard: a VM booted without --shared has no mount at
+# %LIVE_SHARED_DIR%, and if the tee cannot be started we carry on to the console only rather
+# than abort the install. `tee -a` (append) so a re-run adds rather than truncates.
+if [ -n "${AZ_INSTALL_LOGS:-}" ]; then
+    if mountpoint -q "%LIVE_SHARED_DIR%" 2>/dev/null || [ -d "%LIVE_SHARED_DIR%" ]; then
+        if exec > >(tee -a "%LIVE_SHARED_DIR%/install.log") 2>&1; then
+            echo "install log -> %LIVE_SHARED_DIR%/install.log"
+        fi
+    fi
+fi
+
 # ANSI color codes
 LIGHT_BLUE='\\033[1;34m'
 RED='\\033[1;31m'

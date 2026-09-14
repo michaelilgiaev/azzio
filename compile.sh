@@ -38,6 +38,11 @@
 #                            `--ssh=` is a hard error (it stops the build and explains why
 #                            -- no ssh ISO is silently skipped). Omit --ssh entirely to
 #                            build just the base headed ISO.
+#   --logs                   (only with --instant) bake `azzioinstall --logs` into the
+#                            instant ISO's boot hook, so the unattended install tees its
+#                            whole run to Shared/install.log in the host<->guest shared
+#                            folder (beside INSTALL_DONE) for the HOST to read. Boolean;
+#                            a hard error without --instant.
 #   --full-compile           build Azzio's own packages ENTIRELY from source
 #                            (incl. a multi-hour LibreWolf/Firefox compile) instead
 #                            of the default, which repackages LibreWolf's verified

@@ -1802,6 +1802,12 @@ Usage: azzioinstall [ -g | -c | -a [instant-options] | --cli --disk <dev> ] [ -h
                                    unattended install succeeded -- essential with
                                    --final=shutdown, where self-poweroff and a crash look the
                                    same from outside. No-op if no shared folder is mounted.
+        --logs                     Tee the ENTIRE unattended install to Shared/install.log in
+                                   the live session's host<->guest shared folder, so the HOST
+                                   can read exactly what happened (beside INSTALL_DONE) -- the
+                                   companion to --final-indication for diagnosing a failed
+                                   headless install. Boolean (no value). Also valid with --cli.
+                                   No-op if no shared folder is mounted.
       Example:
         azzioinstall --instant --disk=sda --hostname=box --username=me \
           --username-password=secret --share-username-root-password=False \
@@ -1827,8 +1833,9 @@ environment directly (the --instant sub-flags are the friendly front-end for the
 Recognised: AZ_INSTALL_DISK, AZ_INSTALL_HOSTNAME, AZ_INSTALL_USERNAME, AZ_INSTALL_FULLNAME,
 AZ_INSTALL_PASSWORD, AZ_INSTALL_ROOT_PASSWORD, AZ_INSTALL_TIMEZONE, AZ_INSTALL_FILESYSTEM
 (ext4 default, or btrfs), AZ_INSTALL_CHOICE, AZ_INSTALL_SSH (ssh on the installed system;
-the --ssh sub-flag sets it), AZ_INSTALL_FINAL (idle/reboot/shutdown), and
-AZ_INSTALL_FINAL_INDICATION (True/False; the --final-indication sub-flag sets it).
+the --ssh sub-flag sets it), AZ_INSTALL_FINAL (idle/reboot/shutdown),
+AZ_INSTALL_FINAL_INDICATION (True/False; the --final-indication sub-flag sets it), and
+AZ_INSTALL_LOGS (1 tees the whole install to Shared/install.log; the --logs sub-flag sets it).
 Any prompt left un-seeded is asked interactively.
 EOF
 }}
@@ -1888,6 +1895,7 @@ run_cli() {{
         ${{AZ_INSTALL_SSH:+"AZ_INSTALL_SSH=$AZ_INSTALL_SSH"}} \\
         ${{AZ_INSTALL_FINAL:+"AZ_INSTALL_FINAL=$AZ_INSTALL_FINAL"}} \\
         ${{AZ_INSTALL_FINAL_INDICATION:+"AZ_INSTALL_FINAL_INDICATION=$AZ_INSTALL_FINAL_INDICATION"}} \\
+        ${{AZ_INSTALL_LOGS:+"AZ_INSTALL_LOGS=$AZ_INSTALL_LOGS"}} \\
         bash '{INSTALL_CLI_SCRIPT_PATH}'
 }}
 
@@ -1990,6 +1998,12 @@ run_auto() {{
            usage >&2; exit 2 ;;
     esac
     export AZ_INSTALL_FINAL_INDICATION="$az_final_indication"
+
+    # Install logs. Default off. When --logs was given (az_opt_logs=1) the scripted installer
+    # tees its whole run to Shared/install.log in the live host<->guest shared folder, beside
+    # INSTALL_DONE, so a HOST can read exactly what a headless install did. Normalised to a bare
+    # "1" (empty otherwise) so run_cli's `${{AZ_INSTALL_LOGS:+...}}` forward only fires when on.
+    export AZ_INSTALL_LOGS="${{az_opt_logs:+1}}"
     run_cli
 }}
 
@@ -2047,6 +2061,12 @@ while [ $# -gt 0 ]; do
         # it must not trip the "requires --instant" gate the OTHER sub-flags share.
         --ssh) require_value "$@"; shift; az_opt_ssh="$1" ;;
         --ssh=*) az_opt_ssh="${{1#--ssh=}}" ;;
+        # --logs: boolean (no value) -- tee the install to Shared/install.log. Like --ssh it is
+        # valid with --instant OR --cli, so it deliberately does NOT set az_seen_auto_flag (which
+        # would wrongly trip the "requires --instant" gate). Accept a bare --logs and a --logs=*
+        # form (any value is treated as "on") for symmetry with the other flags.
+        --logs) az_opt_logs=1 ;;
+        --logs=*) az_opt_logs=1 ;;
         --final) require_value "$@"; shift; az_opt_final="$1"; az_seen_auto_flag=1 ;;
         --final=*) az_opt_final="${{1#--final=}}"; az_seen_auto_flag=1 ;;
         --final-indication) require_value "$@"; shift; az_opt_final_indication="$1"; az_seen_auto_flag=1 ;;
@@ -2097,6 +2117,20 @@ fi
 # in the environment. run_auto re-exports it from az_opt_ssh itself, so this is idempotent for
 # --instant; empty az_opt_ssh (ssh not requested) leaves it unset and ssh stays off.
 [ -n "$az_opt_ssh" ] && export AZ_INSTALL_SSH="$az_opt_ssh"
+
+# GATE (--logs): like --ssh, --logs only means something for an install mode -- --instant
+# (headless) or --cli (interactive) -- and does nothing under --gui or a bare invocation, so
+# reject it there rather than silently drop it.
+if [ -n "$az_opt_logs" ] && [ "$mode" != "auto" ] && [ "$mode" != "cli" ]; then
+    echo "azzioinstall: --logs requires --instant or --cli (it tees the install to Shared/install.log)." >&2
+    usage >&2
+    exit 2
+fi
+
+# --cli reaches run_cli DIRECTLY, so export AZ_INSTALL_LOGS here for the interactive path (run_auto
+# re-exports it from az_opt_logs for --instant, so this is idempotent). Empty when --logs was not
+# given, so run_cli's forward stays a no-op and no log is written.
+[ -n "$az_opt_logs" ] && export AZ_INSTALL_LOGS=1
 
 case "$mode" in
     gui) run_gui ;;

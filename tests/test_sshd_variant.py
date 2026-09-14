@@ -1339,3 +1339,88 @@ def test_marker_block_install_done_body_reports_ok(tmp_path):
     assert body.splitlines()[0] == "INSTALL_DONE"
     assert "result=ok" in body
     assert "rc=0" in body
+
+
+# --- compiler --logs: bake `azzioinstall --logs` into the instant hook -------
+# --logs is a boolean baked property of the instant medium (NOT an INSTANT_SUBFLAG value-flag):
+# when passed to the compiler it appends the bare azzioinstall sub-flag --logs so the unattended
+# install tees itself to Shared/install.log (beside INSTALL_DONE). Mirrors the --ssh=admin and
+# --final-indication forwarding tests above.
+
+def test_logs_flag_present_detects_forms():
+    assert compiler.logs_flag_present(["--logs"]) is True
+    assert compiler.logs_flag_present(["--logs=1"]) is True
+    assert compiler.logs_flag_present(["--logs=anything"]) is True
+
+
+def test_logs_flag_absent_or_lookalike_is_not_present():
+    assert compiler.logs_flag_present([]) is False
+    assert compiler.logs_flag_present(["--full-compile"]) is False
+    assert compiler.logs_flag_present(["--logsfoo"]) is False   # not exactly --logs / --logs=
+
+
+def test_instant_azzioinstall_args_appends_logs_when_present():
+    args = compiler.instant_azzioinstall_args(["--instant", "--username=hypervisor", "--logs"])
+    assert args == ["--instant", "--username=hypervisor", "--ssh=admin", "--logs"]
+    assert args.count("--logs") == 1   # never doubled
+
+
+def test_instant_azzioinstall_args_omits_logs_when_absent():
+    args = compiler.instant_azzioinstall_args(["--instant", "--username=hypervisor"])
+    assert "--logs" not in args
+
+
+def test_check_instant_logs_without_instant_is_error():
+    # A lone --logs would bake into a hook that does not exist -> hard error naming --instant.
+    msg = compiler.check_instant_flag(["--logs"])
+    assert msg
+    assert "--logs" in msg and "--instant" in msg
+
+
+def test_check_instant_logs_with_instant_ok():
+    assert compiler.check_instant_flag(["--instant", "--logs"]) is None
+    assert compiler.check_instant_flag(["--instant", "--username=hypervisor", "--logs"]) is None
+
+
+def test_logs_reaches_the_baked_hook_end_to_end():
+    # THE codelis cache build, end to end: `compile.sh --instant --username=hypervisor --logs`
+    # must bake a boot hook whose exec line ends in `--logs`, so the unattended install writes
+    # Shared/install.log for the host to read.
+    args = compiler.instant_azzioinstall_args(["--instant", "--username=hypervisor", "--logs"])
+    hook = openbox.instant_install_hook_sh(args)
+    exec_line = [ln for ln in hook.splitlines() if ln.startswith("exec ")][0]
+    assert exec_line.rstrip().endswith("--logs"), exec_line
+    assert "--username=hypervisor" in exec_line and "--ssh=admin" in exec_line
+
+
+def test_installer_sh_tees_to_install_log_when_logs_env_set(tmp_path):
+    # installer.py's log block, exercised as bash: with AZ_INSTALL_LOGS=1 and a shared dir present,
+    # everything the script echoes after it must land in Shared/install.log. We slice the guarded
+    # block out of installer_sh and run it followed by a probe echo, pointing LIVE_SHARED_DIR at a
+    # tmp dir (same technique as the INSTALL_DONE marker test above).
+    import subprocess
+    import installer
+    sh = installer.installer_sh()
+    # The tee block sits between `cd /` and the ANSI-color comment; slice exactly that region.
+    start = sh.index("# INSTALL LOGS")
+    end = sh.index("# ANSI color codes")
+    block = sh[start:end].replace("/home/main/Shared", str(tmp_path))
+    script = (f'set -o pipefail\nAZ_INSTALL_LOGS=1\n{block}\n'
+              f'echo "PROBE-LINE-IN-LOG"\n')
+    subprocess.run(["bash", "-c", script], check=True, timeout=20, capture_output=True, text=True)
+    log = (tmp_path / "install.log")
+    assert log.exists(), "install.log was not created with AZ_INSTALL_LOGS=1"
+    assert "PROBE-LINE-IN-LOG" in log.read_text()
+
+
+def test_installer_sh_no_log_when_logs_env_unset(tmp_path):
+    # The mirror: with AZ_INSTALL_LOGS unset the block is a no-op and NO install.log appears.
+    import subprocess
+    import installer
+    sh = installer.installer_sh()
+    start = sh.index("# INSTALL LOGS")
+    end = sh.index("# ANSI color codes")
+    block = sh[start:end].replace("/home/main/Shared", str(tmp_path))
+    script = f'set -o pipefail\n{block}\necho "PROBE"\n'  # AZ_INSTALL_LOGS deliberately unset
+    subprocess.run(["bash", "-c", script], check=True, timeout=20, capture_output=True, text=True)
+    assert not (tmp_path / "install.log").exists()
