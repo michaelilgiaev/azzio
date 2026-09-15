@@ -24,11 +24,13 @@ import sys
 # test_dual_mode_sibling_imports_have_a_flat_fallback (every relative-importing pkg module
 # must carry its own flat fallback).
 if __package__:
+    from .checks import die
     from .configuration import (
         DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
     )
 else:  # loaded flat -- no parent package
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from checks import die  # noqa: E402
     from configuration import (  # noqa: E402
         DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
     )
@@ -124,3 +126,36 @@ def do_ls(cfg) -> None:
     for inst in instances:
         ssh = str(inst["ssh_port"]) if inst["ssh_port"] is not None else "-"
         print(f"{inst['vm']:<20} {inst['pid']:>7}  {ssh:>7}  {inst['dir']}")
+
+
+def _resolve_target(arg: str) -> dict:
+    """Resolve a `view`/`stop` argument -- a PID or a VM NAME -- to the running-instance
+    record ({vm, pid, dir, ssh_port}) it names, so those subcommands can act on a VM the
+    user is NOT cd'd into. Enumerates the host (`_running_instances`) and matches:
+
+      * an ALL-DIGIT arg is a PID: it must equal a running VM's pid exactly (a numeric
+        arg is NEVER retried as a name -- a bogus pid is an error, not a name lookup).
+      * otherwise it is a name: slugified the same way the VM's own dir basename is
+        (so 'My Proj' matches the 'my-proj' VM), matched against each instance's vm.
+
+    Dies with a clear, actionable message when nothing matches, or -- for a name that
+    hits more than one VM (two dirs whose basenames slug alike) -- lists the candidate
+    pids so the user can re-run against a specific one."""
+    instances = _running_instances()
+    if arg.isdigit():
+        pid = int(arg)
+        for inst in instances:
+            if inst["pid"] == pid:
+                return inst
+        die(f"no running hypervisor VM with PID {pid} "
+            "(list them with 'hypervisor ls')")
+    name = _slugify(arg)
+    matches = [inst for inst in instances if inst["vm"] == name]
+    if not matches:
+        die(f"no running hypervisor VM named '{name}' "
+            "(list them with 'hypervisor ls')")
+    if len(matches) > 1:
+        pids = ", ".join(str(m["pid"]) for m in matches)
+        die(f"more than one running VM named '{name}' (PIDs: {pids}) -- "
+            "re-run against a specific PID")
+    return matches[0]

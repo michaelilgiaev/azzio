@@ -56,14 +56,17 @@ USAGE:
                              up, so `hypervisor view` can attach later).
   hypervisor ls              List every RUNNING hypervisor VM on this host
                              (name, pid, directory, SSH port).
-  hypervisor view            Open a viewer window on THIS dir's running VM
-                             (attach only -- closing it leaves the VM running).
+  hypervisor view [PID|NAME] Open a viewer window on a running VM (attach only --
+                             closing it leaves the VM running). No argument targets
+                             THIS dir's VM; a PID or VM name (from `ls`) targets any
+                             running VM, so you need not be in its directory.
   hypervisor share [--offline]
                              Print commands to mount the host ./shared folder
                              inside the guest. --offline edits the powered-off
                              disk directly (Btrfs @/@home layout only).
   hypervisor status          Show VM name, files, running state, SSH port, toggles.
-  hypervisor stop            Power this VM off.
+  hypervisor stop [PID|NAME] Power a VM off. No argument stops THIS dir's VM; a PID or
+                             VM name (from `ls`) stops any running VM from anywhere.
   hypervisor --configure [--status | --set KEY VALUE | --reset]
                              Manage the GLOBAL defaults every NEW `hypervisor install`
                              starts from (this dir's own hypervisor.cfg still wins).
@@ -120,13 +123,13 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "ls":
             vm.do_ls(cfg)
         elif cmd == "view":
-            vm.do_view(cfg)
+            vm.do_view(cfg, rest[0] if rest else "")
         elif cmd == "share":
             vm.do_share(cfg, rest[0] if rest else "")
         elif cmd == "status":
             vm.do_status(cfg)
         elif cmd == "stop":
-            vm.do_stop(cfg)
+            vm.do_stop(cfg, rest[0] if rest else "")
         elif cmd in ("help", "-h", "--help"):
             print(usage(cfg))
         else:

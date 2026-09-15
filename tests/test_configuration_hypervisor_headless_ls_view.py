@@ -320,3 +320,232 @@ def test_spawn_viewer_uses_spice_socket_and_devnull_stdin(tmp_path, monkeypatch)
     assert captured["argv"][0] == "remote-viewer"
     assert any(a == f"spice+unix://{cfg.spice_sock}" for a in captured["argv"]), captured["argv"]
     assert captured["kw"].get("stdin") is subprocess.DEVNULL
+
+
+# --- Config.from_dir: a Config for ANY directory, not just cwd ----------------
+# `view`/`stop` may target another VM by PID or name; that VM lives in ITS OWN
+# directory, so the subcommand must build a Config rooted there. from_cwd is now a
+# thin wrapper over from_dir(os.getcwd()); from_dir does the identity derivation for
+# an arbitrary directory (vm/proc from the basename, the fixed disk name, the sockets).
+
+def test_from_dir_derives_identity_from_that_directory(tmp_path):
+    from packages.hypervisor.configuration import Config, DISK_NAME
+    d = tmp_path / "MyProj"
+    d.mkdir()
+    cfg = Config.from_dir(str(d))
+    assert cfg.dir == str(d)
+    assert cfg.vm == "myproj"                 # slug of the basename
+    assert cfg.proc == "myproj-vm"            # {slug}-vm, capped to 15
+    assert cfg.disk == os.path.join(str(d), DISK_NAME)
+    assert cfg.spice_sock == os.path.join(str(d), "spice.sock")
+    assert cfg.hypervisor_cfg_path == os.path.join(str(d), "hypervisor.cfg")
+
+
+def test_from_cwd_delegates_to_from_dir(tmp_path, monkeypatch):
+    from packages.hypervisor.configuration import Config
+    d = tmp_path / "workhere"
+    d.mkdir()
+    monkeypatch.setattr(vm.os, "getcwd", lambda: str(d), raising=False)
+    # from_cwd must produce the same identity from_dir(cwd) would.
+    monkeypatch.chdir(d)
+    a = Config.from_cwd()
+    b = Config.from_dir(str(d))
+    assert (a.dir, a.vm, a.proc, a.disk) == (b.dir, b.vm, b.proc, b.disk)
+
+
+# --- _resolve_target: PID or name -> a running instance dict ------------------
+# The backend that `view`/`stop` share. Given a PID string or a VM name, it returns
+# the matching running-instance record ({vm,pid,dir,ssh_port}) or dies clearly:
+# nothing matched, or (for a name) more than one VM shares it.
+
+def _instances(*recs):
+    return list(recs)
+
+
+def test_resolve_target_by_pid(monkeypatch):
+    recs = _instances(
+        {"vm": "azzio", "pid": 333, "dir": "/w/azzio", "ssh_port": None},
+        {"vm": "myproj", "pid": 444, "dir": "/w/myproj", "ssh_port": None},
+    )
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda: recs)
+    got = vm_instances._resolve_target("444")
+    assert got["pid"] == 444 and got["dir"] == "/w/myproj"
+
+
+def test_resolve_target_by_name(monkeypatch):
+    recs = _instances(
+        {"vm": "azzio", "pid": 333, "dir": "/w/azzio", "ssh_port": None},
+        {"vm": "myproj", "pid": 444, "dir": "/w/myproj", "ssh_port": None},
+    )
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda: recs)
+    got = vm_instances._resolve_target("azzio")
+    assert got["pid"] == 333 and got["dir"] == "/w/azzio"
+
+
+def test_resolve_target_name_is_slugified(monkeypatch):
+    # A user may type the directory name with capitals/spaces; match on the slug the
+    # VM actually runs under, so "My Proj" resolves the "my-proj" VM.
+    recs = _instances({"vm": "my-proj", "pid": 42, "dir": "/w/My Proj", "ssh_port": None})
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda: recs)
+    assert vm_instances._resolve_target("My Proj")["pid"] == 42
+
+
+def test_resolve_target_unknown_dies(monkeypatch):
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda: [])
+    with pytest.raises(HypervisorError):
+        vm_instances._resolve_target("nope")
+
+
+def test_resolve_target_ambiguous_name_dies(monkeypatch):
+    # Two VMs in two different dirs whose basenames slug to the SAME name: a bare name
+    # is ambiguous, so refuse and make the user disambiguate by PID.
+    recs = _instances(
+        {"vm": "azzio", "pid": 1, "dir": "/a/azzio", "ssh_port": None},
+        {"vm": "azzio", "pid": 2, "dir": "/b/azzio", "ssh_port": None},
+    )
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda: recs)
+    with pytest.raises(HypervisorError) as exc:
+        vm_instances._resolve_target("azzio")
+    # The two candidate pids should be surfaced so the user can pick one.
+    assert "1" in str(exc.value) and "2" in str(exc.value)
+
+
+def test_resolve_target_pid_that_is_not_a_vm_dies(monkeypatch):
+    # A numeric arg that is not a running hypervisor VM's pid must be refused (not
+    # silently treated as a name that happens to be all digits).
+    recs = _instances({"vm": "azzio", "pid": 333, "dir": "/w/azzio", "ssh_port": None})
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda: recs)
+    with pytest.raises(HypervisorError):
+        vm_instances._resolve_target("999999")
+
+
+# --- do_view / do_stop targeting another instance by PID or name -------------
+
+def test_do_view_with_target_attaches_to_that_instances_dir(tmp_path, monkeypatch):
+    # A running VM lives in target_dir; `view 444` must build a Config for THAT dir and
+    # attach its viewer there, NOT the cwd cfg passed in.
+    target_dir = tmp_path / "azzio"
+    target_dir.mkdir()
+    (target_dir / "hypervisor.cfg").write_text("ssh = false\n", encoding="utf-8")
+    rec = {"vm": "azzio", "pid": 444, "dir": str(target_dir), "ssh_port": None}
+    monkeypatch.setattr(vm, "_resolve_target", lambda arg: rec)
+    monkeypatch.setattr(checks, "require_viewer", lambda: None)
+    monkeypatch.setattr(vm, "is_running", lambda cfg: True)
+    monkeypatch.setattr(vm.os.path, "exists", lambda p: True)
+
+    seen = {}
+
+    class _V:
+        def wait(self):
+            seen["waited"] = True
+
+        def poll(self):
+            return 0
+
+    def _fake_spawn(cfg):
+        seen["dir"] = cfg.dir
+        seen["vm"] = cfg.vm
+        return _V()
+
+    monkeypatch.setattr(vm, "_spawn_viewer", _fake_spawn)
+    # cwd cfg is a DIFFERENT directory; view must ignore it in favour of the target.
+    cwd_cfg = _cfg(tmp_path, vm="somewhereelse")
+    vm.do_view(cwd_cfg, "444")
+    assert seen.get("dir") == str(target_dir)
+    assert seen.get("vm") == "azzio"
+    assert seen.get("waited") is True
+
+
+def test_do_stop_with_target_kills_that_instances_proc(tmp_path, monkeypatch):
+    target_dir = tmp_path / "azzio"
+    target_dir.mkdir()
+    (target_dir / "hypervisor.cfg").write_text("ssh = false\n", encoding="utf-8")
+    rec = {"vm": "azzio", "pid": 444, "dir": str(target_dir), "ssh_port": None}
+    monkeypatch.setattr(vm, "_resolve_target", lambda arg: rec)
+    monkeypatch.setattr(vm, "is_running", lambda cfg: True)
+
+    killed = {}
+    monkeypatch.setattr(vm.subprocess, "run",
+                        lambda argv, **kw: killed.setdefault("argv", argv))
+    vm.do_stop(_cfg(tmp_path, vm="somewhereelse"), "444")
+    # It must pkill the TARGET's proc name (azzio-vm), not the cwd cfg's proc.
+    assert killed["argv"][:2] == ["pkill", "-TERM"]
+    assert "azzio-vm" in killed["argv"]
+
+
+def test_do_stop_no_arg_uses_cwd_cfg(tmp_path, monkeypatch):
+    # Backward compatibility: `hypervisor stop` with no argument still stops THIS dir's
+    # VM (the codelis launcher relies on this -- it cds into the instance and calls
+    # `hypervisor stop`). _resolve_target must NOT be consulted.
+    monkeypatch.setattr(vm, "_resolve_target",
+                        lambda arg: (_ for _ in ()).throw(AssertionError("must not resolve")))
+    monkeypatch.setattr(vm, "is_running", lambda cfg: True)
+    killed = {}
+    monkeypatch.setattr(vm.subprocess, "run",
+                        lambda argv, **kw: killed.setdefault("argv", argv))
+    vm.do_stop(_cfg(tmp_path, vm="thisdir"))
+    assert "thisdir-vm" in killed["argv"]
+
+
+def test_do_view_no_arg_uses_cwd_cfg(tmp_path, monkeypatch):
+    monkeypatch.setattr(vm, "_resolve_target",
+                        lambda arg: (_ for _ in ()).throw(AssertionError("must not resolve")))
+    monkeypatch.setattr(checks, "require_viewer", lambda: None)
+    monkeypatch.setattr(vm, "is_running", lambda cfg: True)
+    monkeypatch.setattr(vm.os.path, "exists", lambda p: True)
+    seen = {}
+
+    class _V:
+        def wait(self):
+            seen["waited"] = True
+
+        def poll(self):
+            return 0
+
+    def _spawn(cfg):
+        seen["dir"] = cfg.dir
+        return _V()
+
+    monkeypatch.setattr(vm, "_spawn_viewer", _spawn)
+    vm.do_view(_cfg(tmp_path, vm="thisdir"))
+    assert seen.get("dir") == str(tmp_path)
+
+
+def test_do_stop_with_target_not_running_reports(tmp_path, monkeypatch, capsys):
+    # If the resolver somehow points at a pid that is no longer alive by the time we
+    # build its cfg, do_stop reports "not running" rather than blindly pkilling.
+    target_dir = tmp_path / "azzio"
+    target_dir.mkdir()
+    (target_dir / "hypervisor.cfg").write_text("ssh = false\n", encoding="utf-8")
+    rec = {"vm": "azzio", "pid": 444, "dir": str(target_dir), "ssh_port": None}
+    monkeypatch.setattr(vm, "_resolve_target", lambda arg: rec)
+    monkeypatch.setattr(vm, "is_running", lambda cfg: False)
+    ran = {}
+    monkeypatch.setattr(vm.subprocess, "run", lambda argv, **kw: ran.setdefault("argv", argv))
+    vm.do_stop(_cfg(tmp_path, vm="somewhereelse"), "444")
+    assert "not running" in capsys.readouterr().out
+    assert "argv" not in ran            # no pkill fired
+
+
+# --- CLI dispatch threads the optional PID/name arg through ------------------
+
+def test_cli_view_passes_target_arg(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(vm, "do_view", lambda cfg, arg="": captured.update(arg=arg))
+    monkeypatch.setattr(cli.Config, "from_cwd", classmethod(lambda cls: _cfg(tmp_path)))
+    assert cli.main(["view", "444"]) == 0
+    assert captured.get("arg") == "444"
+    captured.clear()
+    assert cli.main(["view"]) == 0
+    assert captured.get("arg") == ""
+
+
+def test_cli_stop_passes_target_arg(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(vm, "do_stop", lambda cfg, arg="": captured.update(arg=arg))
+    monkeypatch.setattr(cli.Config, "from_cwd", classmethod(lambda cls: _cfg(tmp_path)))
+    assert cli.main(["stop", "myproj"]) == 0
+    assert captured.get("arg") == "myproj"
+    captured.clear()
+    assert cli.main(["stop"]) == 0
+    assert captured.get("arg") == ""

@@ -35,6 +35,7 @@ if __package__:
     # so vm.do_ls / vm._running_instances / vm._cfg_ssh_port / vm._pid_cwd still resolve here.
     from .vm_instances import (
         do_ls, _running_instances, _scan_proc_table, _pid_cwd, _cfg_ssh_port,
+        _resolve_target,
     )
 else:  # loaded flat (run by absolute path via the launcher) -- no parent package
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,6 +51,7 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
     # so vm.do_ls / vm._running_instances / vm._cfg_ssh_port / vm._pid_cwd still resolve here.
     from vm_instances import (  # noqa: E402
         do_ls, _running_instances, _scan_proc_table, _pid_cwd, _cfg_ssh_port,
+        _resolve_target,
     )
 
 
@@ -811,7 +813,23 @@ def do_status(cfg: Config) -> None:
           f"disk_size={cfg.disk_size} audio={cfg.audio}")
 
 
-def do_stop(cfg: Config) -> None:
+def _target_cfg(cfg: Config, arg: str) -> Config:
+    """The Config a `view`/`stop` invocation should act on. With NO arg it is the cwd
+    cfg the caller passed (the historic behaviour every existing call site -- and the
+    codelis launcher's bare `hypervisor stop` -- relies on). With a PID or name it is a
+    fresh Config rooted at the directory that instance runs in, so we can view/stop a VM
+    the user is not cd'd into."""
+    if not arg:
+        return cfg
+    inst = _resolve_target(arg)
+    return Config.from_dir(inst["dir"])
+
+
+def do_stop(cfg: Config, arg: str = "") -> None:
+    """Power a VM off. With no argument, THIS directory's VM (unchanged). With a PID or
+    a VM name, whichever running instance that resolves to -- so you can stop a VM from
+    anywhere, not just its own directory."""
+    cfg = _target_cfg(cfg, arg)
     if is_running(cfg):
         subprocess.run(["pkill", "-TERM", "-x", cfg.proc],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -829,12 +847,15 @@ def do_stop(cfg: Config) -> None:
 
 
 # --- view: attach a viewer to THIS dir's running VM --------------------------
-def do_view(cfg: Config) -> None:
-    """Open a remote-viewer window on this directory's already-running VM and BLOCK on
-    it. Attach-only: closing the window leaves the VM running (unlike `run`, whose
-    viewer close tears the VM down). Refuses when remote-viewer is missing, the VM is
-    not running, or its SPICE socket is absent."""
+def do_view(cfg: Config, arg: str = "") -> None:
+    """Open a remote-viewer (virt-viewer) window on an already-running VM and BLOCK on
+    it. With no argument it targets THIS directory's VM; with a PID or a VM name it
+    targets whichever running instance that resolves to, so you can view a VM you are
+    not cd'd into. Attach-only: closing the window leaves the VM running (unlike `run`,
+    whose viewer close tears the VM down). Refuses when remote-viewer is missing, the VM
+    is not running, or its SPICE socket is absent."""
     checks.require_viewer()
+    cfg = _target_cfg(cfg, arg)
     if not is_running(cfg):
         die(f"VM '{cfg.vm}' is not running -- start it with 'hypervisor run' first.")
     if not os.path.exists(cfg.spice_sock):
