@@ -300,7 +300,20 @@ class Config:
 
     @classmethod
     def from_cwd(cls) -> "Config":
-        d = os.getcwd()
+        """The Config for the CURRENT working directory -- the default target of every
+        subcommand. A thin wrapper over from_dir(os.getcwd()) so the identity-derivation
+        lives in ONE place (from_dir), reused by `view`/`stop` when they target another
+        VM by PID or name (that VM lives in its own directory, not the cwd)."""
+        return cls.from_dir(os.getcwd())
+
+    @classmethod
+    def from_dir(cls, directory: str) -> "Config":
+        """The Config for an ARBITRARY VM directory. VM identity (vm/proc) is derived
+        from the directory basename -- so two dirs never collide -- and every path
+        (disk, UEFI vars, sockets, cfg) is rooted at `directory`. from_cwd() is just
+        from_dir(os.getcwd()); `view`/`stop` call this directly with the directory a
+        resolved-by-PID/name instance reports, to act on a VM the user is NOT cd'd into."""
+        d = directory
         base = os.path.basename(d)
         vm = _slugify(base)
         proc = f"{vm}-vm"[:15]
