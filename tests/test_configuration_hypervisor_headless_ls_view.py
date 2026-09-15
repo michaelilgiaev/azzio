@@ -490,20 +490,34 @@ def test_do_stop_with_target_kills_that_instances_proc(tmp_path, monkeypatch):
     (target_dir / "hypervisor.cfg").write_text("ssh = false\n", encoding="utf-8")
     rec = {"vm": "azzio", "pid": 444, "dir": str(target_dir), "ssh_port": None}
     monkeypatch.setattr(vm, "_resolve_target", lambda arg: rec)
-    # do_stop now WAITS for the VM to go: running at first, then gone after the TERM so
-    # the wait loop exits at once (no sleeping). time.sleep is stubbed as a belt.
-    states = iter([True, False])
-    monkeypatch.setattr(vm, "is_running", lambda cfg: next(states, False))
+    # A TARGETED stop (name/pid arg) now judges liveness and kills by the RESOLVED pid --
+    # authoritative even for a deleted-dir zombie whose comm no longer matches. Stub os.kill:
+    # sig 0 probes report the pid alive until a terminating signal is sent, then dead so the
+    # wait loop exits at once. is_running must NOT be consulted on the targeted path.
+    sent = []
+    def fake_kill(pid, sig):
+        if sig == 0:
+            if any(p == pid and s != 0 for p, s in sent):
+                raise ProcessLookupError
+            return
+        sent.append((pid, sig))
+    monkeypatch.setattr(vm.os, "kill", fake_kill)
+    monkeypatch.setattr(vm, "is_running",
+                        lambda cfg: (_ for _ in ()).throw(
+                            AssertionError("targeted stop must use pid liveness")))
     monkeypatch.setattr(vm.time, "sleep", lambda s: None)
 
     argvs = []
     monkeypatch.setattr(vm.subprocess, "run", lambda argv, **kw: argvs.append(argv))
     vm.do_stop(_cfg(tmp_path, vm="somewhereelse"), "444")
-    # First kill is the TARGET's QEMU proc (azzio-vm), not the cwd cfg's proc; a graceful
-    # TERM, and no SIGKILL escalation because the VM went down within the grace period.
-    assert argvs[0][:2] == ["pkill", "-TERM"]
-    assert "azzio-vm" in argvs[0]
+    # The resolved pid gets a graceful SIGTERM (this is what actually kills a zombie).
+    assert (444, vm.signal.SIGTERM) in sent
+    # And the TARGET's QEMU proc (azzio-vm) is also pkilled by comm -- belt-and-braces, and
+    # never the cwd cfg's proc. A graceful TERM, and NO SIGKILL escalation (it went down in
+    # the grace period -- neither an os.kill SIGKILL nor a pkill -KILL).
+    assert any(a[:2] == ["pkill", "-TERM"] and "azzio-vm" in a for a in argvs)
     assert not any("-KILL" in a for a in argvs)
+    assert not any(s == vm.signal.SIGKILL for _, s in sent)
     # It also proactively TERMs THIS VM's virtiofsd (matched on its per-dir socket) so its
     # shutdown message never leaks to the terminal after the prompt returns.
     assert any(a[:2] == ["pkill", "-TERM"] and any("virtiofsd" in x for x in a)
