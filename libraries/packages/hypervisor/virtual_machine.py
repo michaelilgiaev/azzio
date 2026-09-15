@@ -73,10 +73,23 @@ def virtiofsd_argv(cfg: Config) -> list[str]:
     "Failed to connect ... No such file or directory"). Rootless virtiofsd needs no
     privilege: it runs as the invoking user, the socket it creates is owned by that
     same user, and the (also non-root) QEMU opens it directly -- no --socket-group,
-    no chmod dance. The one tradeoff of dropping root is that the daemon can no longer
-    setfsuid() to arbitrary guest credentials, so the guest can only create files as
-    the host user; with host and guest both on uid 1000 (the azzio default) that is
-    exactly what we want, so create/mkdir in the share works fine.
+    no chmod dance. The tradeoff of dropping root is that the daemon can no longer
+    setfsuid() to arbitrary guest credentials: a create/write stamped with a guest
+    id the host user does NOT hold is rejected by the host kernel with EPERM
+    ("Operation not permitted"), even on an rw mount owned by the guest user. This
+    bites whenever the guest's uid/gid differ from the host's -- e.g. an azzio guest
+    on uid 1000 but PRIMARY gid 998 (autologin), whose every write carries gid 998,
+    a gid the host user (gid 1000) cannot act as. The result is a share that mounts
+    rw yet denies all writes.
+
+    --translate-uid / --translate-gid in 'squash-guest' mode fix this: they collapse
+    the ENTIRE guest id range down to the single host id, so no matter what uid/gid
+    the guest stamps (998, 1000, anything), virtiofsd performs the operation on the
+    host as our own uid/gid -- which we own -- and the write always succeeds. Files
+    the guest creates come back owned by the guest user (the guest sees its own ids;
+    only the host-side action is squashed). 'squash-guest:0:<host-id>:<count>' maps
+    guest ids [0, count) to <host-id>; a full-range count covers every possible id.
+    (Cannot combine with --posix-acl=always|auto, which we do not enable.)
 
     --sandbox=none keeps the daemon in the host mount namespace (the default sandbox
     would pivot_root INTO the shared dir); the socket is one per VM dir so two VMs
@@ -91,11 +104,20 @@ def virtiofsd_argv(cfg: Config) -> list[str]:
     # pinning; whether the daemon is actually present is enforced separately by
     # require_virtiofsd() before any real spawn.
     binary = checks.virtiofsd_binary() or "virtiofsd"
+    # Squash every guest uid/gid onto OUR real host uid/gid so any guest write lands
+    # as an id we own and never hits EPERM (see docstring). getuid/getgid, not a
+    # hardcoded 1000, so this is correct whatever user actually launches the daemon.
+    # 0xffffffff (2^32-1) as the range count covers the whole 32-bit id space, so no
+    # guest id -- the autologin gid 998 included -- ever escapes the squash.
+    host_uid, host_gid = os.getuid(), os.getgid()
+    _ALL_IDS = 0xFFFFFFFF
     return [
         binary,
         f"--socket-path={cfg.virtiofs_sock}",
         f"--shared-dir={path}",
         "--sandbox=none",
+        f"--translate-uid=squash-guest:0:{host_uid}:{_ALL_IDS}",
+        f"--translate-gid=squash-guest:0:{host_gid}:{_ALL_IDS}",
     ]
 
 

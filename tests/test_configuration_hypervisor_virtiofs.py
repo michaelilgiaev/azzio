@@ -65,6 +65,35 @@ def test_daemon_needs_no_socket_group_when_rootless(tmp_path):
     assert not any(a.startswith("--socket-group") for a in argv)
 
 
+def test_daemon_squashes_guest_ids_to_host_owner(tmp_path, monkeypatch):
+    # THE writable-share guard. Rootless virtiofsd cannot setfsuid() to guest
+    # credentials, so a guest write stamped with an id the host user does NOT hold
+    # is rejected with EPERM -- the share mounts rw yet every write fails. This bit
+    # an azzio guest on uid 1000 / PRIMARY gid 998 (autologin): gid 998 is not a gid
+    # the host user (gid 1000) can act as. The fix squashes the WHOLE guest id range
+    # onto our real host uid/gid via --translate-uid/--translate-gid, so any guest id
+    # collapses to one we own and the write always lands. Pin it so a future edit
+    # cannot silently drop the flags and re-lock the share.
+    monkeypatch.setattr(vm.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(vm.os, "getgid", lambda: 998)
+    cfg = _cfg(tmp_path, shared=True)
+    argv = vm.virtiofsd_argv(cfg)
+    _ALL = 0xFFFFFFFF  # full 32-bit id range -> no guest id (998 included) escapes
+    assert f"--translate-uid=squash-guest:0:1000:{_ALL}" in argv, argv
+    assert f"--translate-gid=squash-guest:0:998:{_ALL}" in argv, argv
+
+
+def test_daemon_squash_tracks_the_real_launching_user(tmp_path, monkeypatch):
+    # The squash target is our ACTUAL uid/gid (os.getuid/os.getgid), never a
+    # hardcoded 1000 -- so whoever launches the daemon, guest writes land as that
+    # user's own ids. Pin different ids and prove they flow through verbatim.
+    monkeypatch.setattr(vm.os, "getuid", lambda: 4242)
+    monkeypatch.setattr(vm.os, "getgid", lambda: 4343)
+    argv = vm.virtiofsd_argv(_cfg(tmp_path, shared=True))
+    assert any(a.startswith("--translate-uid=squash-guest:0:4242:") for a in argv), argv
+    assert any(a.startswith("--translate-gid=squash-guest:0:4343:") for a in argv), argv
+
+
 def test_daemon_exports_custom_path(tmp_path):
     custom = "/mnt/host/project"
     cfg = _cfg(tmp_path, shared=custom)
