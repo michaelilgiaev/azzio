@@ -826,16 +826,41 @@ def _target_cfg(cfg: Config, arg: str) -> Config:
 
 
 def do_stop(cfg: Config, arg: str = "") -> None:
-    """Power a VM off. With no argument, THIS directory's VM (unchanged). With a PID or
-    a VM name, whichever running instance that resolves to -- so you can stop a VM from
-    anywhere, not just its own directory."""
+    """Power a VM off, CLEANLY and synchronously. With no argument, THIS directory's VM;
+    with a PID or a VM name, whichever running instance that resolves to.
+
+    This used to only SIGTERM QEMU and return at once, leaving the VM's virtiofsd daemon
+    to be reaped ASYNCHRONOUSLY by the backgrounded `hypervisor run` process -- so its
+    "[INFO virtiofsd] Client disconnected, shutting down" line printed to the terminal
+    AFTER the prompt came back, and `stop` looked hung. We now (1) SIGTERM QEMU, (2)
+    directly kill this VM's virtiofsd (matched by its per-dir socket, so no other VM's
+    daemon is touched) so its teardown happens HERE under our control instead of leaking
+    out later, and (3) WAIT (bounded) for QEMU to actually exit, escalating to SIGKILL if
+    it overstays -- so the command returns only once the VM is truly down. `run`'s own
+    cleanup() still runs and is idempotent, so double-killing is harmless."""
     cfg = _target_cfg(cfg, arg)
-    if is_running(cfg):
-        subprocess.run(["pkill", "-TERM", "-x", cfg.proc],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"Sent power-off to VM '{cfg.vm}'.")
-    else:
+    if not is_running(cfg):
         print(f"VM '{cfg.vm}' is not running.")
+        return
+    subprocess.run(["pkill", "-TERM", "-x", cfg.proc],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Kill THIS VM's virtiofsd now (its stdout was the launcher's terminal). Matched on
+    # the per-VM socket path so only this VM's daemon dies. Silent -- we own its exit here.
+    subprocess.run(["pkill", "-TERM", "-f", f"virtiofsd.*{cfg.virtiofs_sock}"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Wait (bounded ~5s) for QEMU to go, so `stop` is synchronous: the prompt returns
+    # only after the VM is actually down, never with a stray daemon message still to come.
+    for _ in range(50):
+        if not is_running(cfg):
+            break
+        time.sleep(0.1)
+    else:
+        # Overstayed the grace period -- force it (and its daemon) down.
+        subprocess.run(["pkill", "-KILL", "-x", cfg.proc],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-KILL", "-f", f"virtiofsd.*{cfg.virtiofs_sock}"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print(f"Powered off VM '{cfg.vm}'.")
 
 
 # --- ls: every running VM on the host ----------------------------------------

@@ -27,12 +27,14 @@ if __package__:
     from .checks import die
     from .configuration import (
         DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
+        _vm_name_in_cfg,
     )
 else:  # loaded flat -- no parent package
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from checks import die  # noqa: E402
     from configuration import (  # noqa: E402
         DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
+        _vm_name_in_cfg,
     )
 
 
@@ -105,7 +107,14 @@ def _running_instances(proc_table: "list | None" = None) -> list:
         directory = _pid_cwd(pid)
         if not directory:
             continue
-        vm_name = _slugify(os.path.basename(directory))
+        # The authoritative name matches Config.from_dir: an explicit vm_name in the dir's
+        # hypervisor.cfg wins, else the dir basename. This is why codelis's fixed
+        # 'venv/codelis' dir still shows as 'codelis-claudedebug' in `ls` and resolves under
+        # that name for `stop`/`view` -- codelis writes vm_name into the instance cfg.
+        # Enumeration reads the cfg (per-dir), NEVER the env, so one shell's
+        # HYPERVISOR_VM_NAME can't stamp itself onto every VM listed here.
+        override = _vm_name_in_cfg(directory)
+        vm_name = _slugify(override) if override else _slugify(os.path.basename(directory))
         instances.append({
             "vm": vm_name,
             "pid": pid,
