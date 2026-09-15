@@ -847,6 +847,29 @@ def _target_cfg(cfg: Config, arg: str) -> Config:
     return Config.from_dir(inst["dir"])
 
 
+def _target_cfg_and_pid(cfg: Config, arg: str) -> "tuple[Config, int | None]":
+    """Like _target_cfg, but also returns the RESOLVED pid (or None for the bare cwd
+    case). stop uses the pid to kill the exact process `_resolve_target` matched --
+    authoritative even when the VM's dir was deleted and the comm-derived match would
+    otherwise be unreliable. view ignores the pid (it only needs the cfg for sockets)."""
+    if not arg:
+        return cfg, None
+    inst = _resolve_target(arg)
+    return Config.from_dir(inst["dir"]), inst["pid"]
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if `pid` exists (signal 0 probes without killing)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # It exists, we just may not own it -- treat as alive.
+        return True
+
+
 def do_stop(cfg: Config, arg: str = "") -> None:
     """Power a VM off, CLEANLY and synchronously. With no argument, THIS directory's VM;
     with a PID or a VM name, whichever running instance that resolves to.
@@ -860,10 +883,25 @@ def do_stop(cfg: Config, arg: str = "") -> None:
     out later, and (3) WAIT (bounded) for QEMU to actually exit, escalating to SIGKILL if
     it overstays -- so the command returns only once the VM is truly down. `run`'s own
     cleanup() still runs and is idempotent, so double-killing is harmless."""
-    cfg = _target_cfg(cfg, arg)
-    if not is_running(cfg):
+    cfg, pid = _target_cfg_and_pid(cfg, arg)
+
+    # "Running?" check. When we resolved a concrete pid (arg was a name/pid), trust THAT
+    # pid's liveness -- it is authoritative even for a VM whose dir was deleted, where the
+    # comm-based is_running(cfg) could disagree. With no pid (bare cwd stop) fall back to
+    # the comm match, exactly as before.
+    running = _pid_alive(pid) if pid is not None else is_running(cfg)
+    if not running:
         print(f"VM '{cfg.vm}' is not running.")
         return
+
+    # SIGTERM the QEMU process. Kill it BOTH by the resolved pid (exact, dir-independent)
+    # and by comm (covers the bare-cwd path where pid is None). The pid kill is what makes
+    # a deleted-dir zombie actually die: its recomputed comm may not match, but the pid does.
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
     subprocess.run(["pkill", "-TERM", "-x", cfg.proc],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Kill THIS VM's virtiofsd now (its stdout was the launcher's terminal). Matched on
@@ -872,12 +910,20 @@ def do_stop(cfg: Config, arg: str = "") -> None:
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     # Wait (bounded ~5s) for QEMU to go, so `stop` is synchronous: the prompt returns
     # only after the VM is actually down, never with a stray daemon message still to come.
+    # Liveness is judged by the same authoritative source used above.
+    def _still_up() -> bool:
+        return _pid_alive(pid) if pid is not None else is_running(cfg)
     for _ in range(50):
-        if not is_running(cfg):
+        if not _still_up():
             break
         time.sleep(0.1)
     else:
         # Overstayed the grace period -- force it (and its daemon) down.
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
         subprocess.run(["pkill", "-KILL", "-x", cfg.proc],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["pkill", "-KILL", "-f", f"virtiofsd.*{cfg.virtiofs_sock}"],

@@ -61,11 +61,25 @@ def _scan_proc_table() -> list:
 
 def _pid_cwd(pid: int) -> str:
     """The working directory of `pid` (readlink /proc/<pid>/cwd), or '' if gone.
-    A VM's dir IS its identity, so this is how `ls` recovers WHERE each VM lives."""
+    A VM's dir IS its identity, so this is how `ls` recovers WHERE each VM lives.
+
+    If the dir was DELETED while the VM still runs, the kernel makes the symlink read
+    back as "<dir> (deleted)". We STRIP that suffix so the VM keeps slugging to its
+    real name ("codelis", not "codelis-deleted"): with the clean basename the proc
+    name `stop` recomputes (`_proc_name(_slugify(basename))`) still equals the LIVE
+    comm, so `stop <name>`/`stop <pid>` can actually kill the zombie instead of
+    reporting "not running". (Without this strip the recomputed comm was the truncated
+    "codelis-dele-vm", which never matched the running "codelis-vm".)"""
     try:
-        return os.readlink(f"/proc/{pid}/cwd")
+        target = os.readlink(f"/proc/{pid}/cwd")
     except OSError:
         return ""
+    # The kernel appends this exact literal for an unlinked cwd. A real directory path
+    # never ends in it, so stripping is safe.
+    suffix = " (deleted)"
+    if target.endswith(suffix):
+        target = target[: -len(suffix)]
+    return target
 
 
 def _cfg_ssh_port(directory: str) -> "int | None":
