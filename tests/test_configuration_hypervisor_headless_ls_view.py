@@ -226,6 +226,34 @@ def test_running_instances_matches_vm_comms_and_sorts(tmp_path, monkeypatch):
     assert by["myproj"]["ssh_port"] is None  # ssh off -> None
 
 
+def test_running_instances_uses_vm_name_from_cfg(tmp_path, monkeypatch):
+    # A VM whose dir basename is 'codelis' but whose cfg carries vm_name must be LISTED
+    # under the vm_name (this is exactly codelis' case: fixed venv/codelis dir named
+    # 'codelis-claudedebug'). The comm can be truncated ('codelis-clau-vm'); the dir/cfg
+    # is authoritative for the displayed name.
+    d = tmp_path / "codelis"
+    os.mkdir(d)
+    with open(d / "hypervisor.cfg", "w", encoding="utf-8") as fh:
+        fh.write("vm_name = codelis-claudedebug\nssh = true\nssh_guest_to_host_port_forward = 49156\n")
+    monkeypatch.setattr(vm_instances, "_pid_cwd", lambda pid: str(d) if pid == 900 else "")
+    got = vm_instances._running_instances([(900, "codelis-clau-vm")])
+    assert [i["vm"] for i in got] == ["codelis-claudedebug"], got
+    assert got[0]["ssh_port"] == 49156
+
+
+def test_running_instances_ignores_ambient_env_vm_name(tmp_path, monkeypatch):
+    # Enumeration must read the per-dir cfg only -- a stray HYPERVISOR_VM_NAME in the
+    # shell running `hypervisor ls` must NOT rename every VM to that value.
+    d = tmp_path / "myproj"
+    os.mkdir(d)
+    with open(d / "hypervisor.cfg", "w", encoding="utf-8") as fh:
+        fh.write("ssh = false\n")
+    monkeypatch.setenv("HYPERVISOR_VM_NAME", "leaked")
+    monkeypatch.setattr(vm_instances, "_pid_cwd", lambda pid: str(d) if pid == 901 else "")
+    got = vm_instances._running_instances([(901, "myproj-vm")])
+    assert [i["vm"] for i in got] == ["myproj"], got
+
+
 def test_cfg_ssh_port_defaults_when_no_port_line(tmp_path):
     d = tmp_path
     with open(d / "hypervisor.cfg", "w", encoding="utf-8") as fh:
@@ -462,15 +490,24 @@ def test_do_stop_with_target_kills_that_instances_proc(tmp_path, monkeypatch):
     (target_dir / "hypervisor.cfg").write_text("ssh = false\n", encoding="utf-8")
     rec = {"vm": "azzio", "pid": 444, "dir": str(target_dir), "ssh_port": None}
     monkeypatch.setattr(vm, "_resolve_target", lambda arg: rec)
-    monkeypatch.setattr(vm, "is_running", lambda cfg: True)
+    # do_stop now WAITS for the VM to go: running at first, then gone after the TERM so
+    # the wait loop exits at once (no sleeping). time.sleep is stubbed as a belt.
+    states = iter([True, False])
+    monkeypatch.setattr(vm, "is_running", lambda cfg: next(states, False))
+    monkeypatch.setattr(vm.time, "sleep", lambda s: None)
 
-    killed = {}
-    monkeypatch.setattr(vm.subprocess, "run",
-                        lambda argv, **kw: killed.setdefault("argv", argv))
+    argvs = []
+    monkeypatch.setattr(vm.subprocess, "run", lambda argv, **kw: argvs.append(argv))
     vm.do_stop(_cfg(tmp_path, vm="somewhereelse"), "444")
-    # It must pkill the TARGET's proc name (azzio-vm), not the cwd cfg's proc.
-    assert killed["argv"][:2] == ["pkill", "-TERM"]
-    assert "azzio-vm" in killed["argv"]
+    # First kill is the TARGET's QEMU proc (azzio-vm), not the cwd cfg's proc; a graceful
+    # TERM, and no SIGKILL escalation because the VM went down within the grace period.
+    assert argvs[0][:2] == ["pkill", "-TERM"]
+    assert "azzio-vm" in argvs[0]
+    assert not any("-KILL" in a for a in argvs)
+    # It also proactively TERMs THIS VM's virtiofsd (matched on its per-dir socket) so its
+    # shutdown message never leaks to the terminal after the prompt returns.
+    assert any(a[:2] == ["pkill", "-TERM"] and any("virtiofsd" in x for x in a)
+               for a in argvs)
 
 
 def test_do_stop_no_arg_uses_cwd_cfg(tmp_path, monkeypatch):
@@ -479,12 +516,26 @@ def test_do_stop_no_arg_uses_cwd_cfg(tmp_path, monkeypatch):
     # `hypervisor stop`). _resolve_target must NOT be consulted.
     monkeypatch.setattr(vm, "_resolve_target",
                         lambda arg: (_ for _ in ()).throw(AssertionError("must not resolve")))
-    monkeypatch.setattr(vm, "is_running", lambda cfg: True)
-    killed = {}
-    monkeypatch.setattr(vm.subprocess, "run",
-                        lambda argv, **kw: killed.setdefault("argv", argv))
+    states = iter([True, False])
+    monkeypatch.setattr(vm, "is_running", lambda cfg: next(states, False))
+    monkeypatch.setattr(vm.time, "sleep", lambda s: None)
+    argvs = []
+    monkeypatch.setattr(vm.subprocess, "run", lambda argv, **kw: argvs.append(argv))
     vm.do_stop(_cfg(tmp_path, vm="thisdir"))
-    assert "thisdir-vm" in killed["argv"]
+    assert "thisdir-vm" in argvs[0]
+
+
+def test_do_stop_escalates_to_sigkill_when_qemu_overstays(tmp_path, monkeypatch):
+    # If QEMU never dies within the grace period, do_stop escalates to SIGKILL (for both
+    # QEMU and the VM's virtiofsd) so `stop` still returns with the VM actually down.
+    monkeypatch.setattr(vm, "_resolve_target",
+                        lambda arg: (_ for _ in ()).throw(AssertionError("must not resolve")))
+    monkeypatch.setattr(vm, "is_running", lambda cfg: True)   # never goes down
+    monkeypatch.setattr(vm.time, "sleep", lambda s: None)     # do not actually wait
+    argvs = []
+    monkeypatch.setattr(vm.subprocess, "run", lambda argv, **kw: argvs.append(argv))
+    vm.do_stop(_cfg(tmp_path, vm="stubborn"))
+    assert any(a[:2] == ["pkill", "-KILL"] and "stubborn-vm" in a for a in argvs)
 
 
 def test_do_view_no_arg_uses_cwd_cfg(tmp_path, monkeypatch):

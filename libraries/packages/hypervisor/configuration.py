@@ -36,7 +36,7 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
 CODE = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 VARS_TMPL = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
-DEFAULT_SSH_FORWARD_PORT = 49155
+DEFAULT_SSH_FORWARD_PORT = 49156
 
 _HYPERVISOR_CFG_NAME = "hypervisor.cfg"
 
@@ -242,6 +242,56 @@ def _slugify(base: str) -> str:
     return s or "vm"
 
 
+# The explicit VM-name override key, read RAW (never through the typed schema, so it
+# does not appear in `--configure`, the generated cfg, or the live-reload watcher). Env
+# wins over the file so a launcher can set it without editing the cfg.
+_VM_NAME_ENV = "HYPERVISOR_VM_NAME"
+_VM_NAME_CFG_KEY = "vm_name"
+
+
+def _vm_name_in_cfg(directory: str) -> str:
+    """The raw `vm_name = ...` line in this dir's hypervisor.cfg, or '' when absent.
+    Read with the ONE canonical parser (parse_conf_text) so it agrees with the loader
+    about what a line is; a missing/unreadable cfg yields ''. This is the PER-DIRECTORY
+    source, safe for host-wide enumeration (`hypervisor ls`) where an ambient env var
+    must NOT leak onto every listed VM."""
+    path = os.path.join(directory, _HYPERVISOR_CFG_NAME)
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            raw = parse_conf_text(fh.read())
+    except OSError:
+        return ""
+    return raw.get(_VM_NAME_CFG_KEY, "").strip()
+
+
+def _vm_name_override(directory: str) -> str:
+    """An explicit VM name for the CURRENT invocation's dir, or '' when none is set.
+    Order: the HYPERVISOR_VM_NAME env var wins, then the dir's `vm_name =` cfg line.
+
+    Env is honoured ONLY here (the single-VM launcher/`from_dir` context, where the env
+    belongs to THIS process). Host-wide enumeration must use _vm_name_in_cfg instead --
+    reading the env there would stamp one shell's HYPERVISOR_VM_NAME onto every VM `ls`
+    reports. Kept OUT of the typed schema on purpose: it is a launcher-set identity hint,
+    not a tunable VM setting, so it must not clutter --configure or the generated file."""
+    env = os.environ.get(_VM_NAME_ENV, "").strip()
+    if env:
+        return env
+    return _vm_name_in_cfg(directory)
+
+
+def _proc_name(vm: str) -> str:
+    """The process comm for a VM slug, ALWAYS ending in '-vm' within the kernel's
+    15-char comm limit (TASK_COMM_LEN-1). A short slug is just '{vm}-vm'; a long one
+    (e.g. 'codelis-claudedebug') would have its '-vm' suffix truncated by a naive
+    '{vm}-vm'[:15], breaking `hypervisor ls` (which filters on comm.endswith('-vm')) and
+    `pkill -x` teardown. So we trim the SLUG to leave room for '-vm' and keep the suffix
+    intact. `_running_instances` recovers the authoritative, untruncated name from the
+    dir/cfg anyway -- this comm only has to reliably say 'a hypervisor VM'."""
+    suffix = "-vm"
+    room = 15 - len(suffix)
+    return f"{vm[:room]}{suffix}"
+
+
 @dataclass
 class Config:
     dir: str
@@ -315,8 +365,15 @@ class Config:
         resolved-by-PID/name instance reports, to act on a VM the user is NOT cd'd into."""
         d = directory
         base = os.path.basename(d)
-        vm = _slugify(base)
-        proc = f"{vm}-vm"[:15]
+        # VM identity: normally the directory basename, but an explicit vm_name (env
+        # HYPERVISOR_VM_NAME, or a `vm_name = ...` line in hypervisor.cfg) OVERRIDES it.
+        # codelis uses this so its instance -- which always lives in the fixed dir
+        # <workdir>/venv/codelis (basename 'codelis') -- can still be NAMED after the work
+        # directory, e.g. 'codelis-claudedebug'. When no override is set we fall back to the
+        # basename, so a plain `hypervisor` in some dir is unchanged.
+        override = _vm_name_override(d)
+        vm = _slugify(override) if override else _slugify(base)
+        proc = _proc_name(vm)
 
         hcfg = HypervisorCfg.from_dir(d)  # schema in from_dir already validated it
 
@@ -434,7 +491,7 @@ def _glob_sorted(directory: str, suffix: str) -> list[str]:
 
 
 def select_ssh_port(cfg: Config) -> int:
-    """The forwarded host port for guest :22. Defaults to 49155 (or whatever
+    """The forwarded host port for guest :22. Defaults to 49156 (or whatever
     ssh_guest_to_host_port_forward / SSHPORT is set to); bumps past a port
     already in use so two VMs never collide. Never climbs past the max valid TCP
     port (65535) -- if everything up to there is busy it dies cleanly rather than

@@ -22,7 +22,7 @@ _HCFG_DEFAULTS = {
     "network": "user",
     "shared": False,
     "ssh": False,
-    "ssh_guest_to_host_port_forward": 49155,
+    "ssh_guest_to_host_port_forward": 49156,
     "usb": [],
     "fullscreen": False,
     "ask_before_quitting_hypervisor": False,

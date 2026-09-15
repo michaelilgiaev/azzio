@@ -31,13 +31,57 @@ def test_slugify(raw, expected):
     assert _slugify(raw) == expected
 
 
+# --- vm_name override + proc-name suffix ------------------------------------
+# codelis' instance always lives in the fixed dir <workdir>/venv/codelis, so the dir
+# basename is 'codelis'. An explicit vm_name lets it still be NAMED after the work dir
+# (e.g. 'codelis-claudedebug'), and _proc_name must keep the '-vm' comm suffix intact
+# even for such a long name (else `hypervisor ls`/`stop` -- which match on '-vm' -- break).
+
+def test_proc_name_preserves_vm_suffix_within_15_chars():
+    from packages.hypervisor.configuration import _proc_name
+    # short name: plain "{vm}-vm"
+    assert _proc_name("codelis") == "codelis-vm"
+    # long name: slug trimmed so the "-vm" suffix survives the 15-char comm cap
+    p = _proc_name("codelis-claudedebug")
+    assert p.endswith("-vm") and len(p) <= 15
+
+
+def test_from_dir_uses_vm_name_from_cfg(tmp_path):
+    (tmp_path / "hypervisor.cfg").write_text("vm_name = codelis-claudedebug\n", encoding="utf-8")
+    cfg = Config.from_dir(str(tmp_path))
+    assert cfg.vm == "codelis-claudedebug"     # NOT the dir basename
+    assert cfg.proc.endswith("-vm")
+
+
+def test_from_dir_vm_name_env_wins_over_cfg(tmp_path, monkeypatch):
+    (tmp_path / "hypervisor.cfg").write_text("vm_name = from-cfg\n", encoding="utf-8")
+    monkeypatch.setenv("HYPERVISOR_VM_NAME", "from-env")
+    cfg = Config.from_dir(str(tmp_path))
+    assert cfg.vm == "from-env"
+
+
+def test_from_dir_no_vm_name_falls_back_to_basename(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERVISOR_VM_NAME", raising=False)
+    cfg = Config.from_dir(str(tmp_path))
+    assert cfg.vm == _slugify(tmp_path.name)
+
+
+def test_vm_name_in_cfg_ignores_env(tmp_path, monkeypatch):
+    # The enumeration path (`hypervisor ls`) must read ONLY the per-dir cfg -- an ambient
+    # HYPERVISOR_VM_NAME must not stamp itself onto every listed VM.
+    from packages.hypervisor.configuration import _vm_name_in_cfg
+    (tmp_path / "hypervisor.cfg").write_text("vm_name = from-cfg\n", encoding="utf-8")
+    monkeypatch.setenv("HYPERVISOR_VM_NAME", "from-env")
+    assert _vm_name_in_cfg(str(tmp_path)) == "from-cfg"
+
+
 # --- select_ssh_port --------------------------------------------------------
 
-def test_select_ssh_port_defaults_to_49155(monkeypatch):
+def test_select_ssh_port_defaults_to_49156(monkeypatch):
     monkeypatch.setattr(config, "_port_in_use", lambda p: False)
     cfg = _make_cfg("testvm")
     assert select_ssh_port(cfg) == DEFAULT_SSH_FORWARD_PORT
-    assert DEFAULT_SSH_FORWARD_PORT == 49155
+    assert DEFAULT_SSH_FORWARD_PORT == 49156
 
 
 def test_select_ssh_port_bumps_past_a_used_port(monkeypatch):
@@ -77,7 +121,7 @@ def test_cfg_defaults_when_no_file(tmp_path):
     assert hcfg.shared is False
     assert hcfg.usb == []                          # list now, not False
     assert hcfg.ssh is False                       # renamed from sshd
-    assert hcfg.ssh_guest_to_host_port_forward == 49155
+    assert hcfg.ssh_guest_to_host_port_forward == 49156
 
 
 def test_cfg_parses_typed_values(tmp_path):
@@ -234,5 +278,5 @@ def test_resolve_run_disk_missing_named_file_raises(tmp_path):
 
 # --- helpers ----------------------------------------------------------------
 
-def _make_cfg(vm: str, *, directory: str = "/d", ssh_port: int = 49155) -> Config:
+def _make_cfg(vm: str, *, directory: str = "/d", ssh_port: int = 49156) -> Config:
     return make_cfg(directory, vm=vm, ssh_guest_to_host_port_forward=ssh_port)
