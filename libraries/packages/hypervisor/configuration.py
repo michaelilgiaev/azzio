@@ -87,11 +87,13 @@ _CFG_HEADER = (
 
 def _render_value(key: str, val) -> str:
     """Render a coerced value back to its hypervisor.cfg string form. Bools -> True/False,
-    strings -> quoted, Ports -> "g:h, g2:h2", USB -> space-joined paths, Percent -> "N%"."""
+    strings -> quoted, Ports -> "g:h, g2:h2", USB -> space-joined paths, Percent -> N%
+    (unquoted, so a percentage reads as distinct from a quoted string; the parser still
+    accepts a quoted "N%" on input)."""
     if isinstance(val, bool):
         return "True" if val else "False"
     if isinstance(val, Percent):
-        return f'"{val.percent}%"'
+        return f"{val.percent}%"
     if key == "Ports":
         return '"' + ", ".join(f"{g}:{h}" for g, h in val) + '"' if val else "False"
     if key == "USB":

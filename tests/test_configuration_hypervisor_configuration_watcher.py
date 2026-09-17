@@ -52,7 +52,7 @@ def test_unchanged_file_is_a_noop():
 
 def test_changed_keys_are_reported():
     good = _good()
-    new = good.text.replace('RAM = "15%"', "RAM = 8192")
+    new = good.text.replace('RAM = 15%', "RAM = 8192")
     decision = cw.evaluate_save(new, good)
     assert decision.valid
     assert "RAM" in decision.changed_keys
@@ -62,7 +62,7 @@ def test_changed_keys_are_reported():
 
 def test_ram_change_is_reboot_only():
     good = _good()
-    new = good.text.replace('RAM = "15%"', "RAM = 8192")
+    new = good.text.replace('RAM = 15%', "RAM = 8192")
     decision = cw.evaluate_save(new, good)
     assert "RAM" in decision.reboot_changes
     assert "RAM" not in decision.live_changes
@@ -71,7 +71,7 @@ def test_ram_change_is_reboot_only():
 def test_cpus_and_network_are_reboot_only():
     good = _good()
     new = good.text
-    new = new.replace('CPUs = "15%"', "CPUs = 8")
+    new = new.replace('CPUs = 15%', "CPUs = 8")
     new = new.replace('Network = "user"', 'Network = "none"')
     decision = cw.evaluate_save(new, good)
     for key in ("CPUs", "Network"):
@@ -105,7 +105,7 @@ def test_every_changed_key_is_classified_live_or_reboot():
     # flip several settings at once; each changed key must land in exactly one bucket.
     new = good.text
     new = new.replace("Audio = True", "Audio = False")
-    new = new.replace('RAM = "15%"', "RAM = 4096")
+    new = new.replace('RAM = 15%', "RAM = 4096")
     new = new.replace("Fullscreen = False", "Fullscreen = True")
     decision = cw.evaluate_save(new, good)
     for key in decision.changed_keys:
@@ -119,7 +119,7 @@ def test_every_changed_key_is_classified_live_or_reboot():
 
 def test_invalid_edit_is_rejected_and_reverts_to_last_good():
     good = _good()
-    broken = good.text.replace('CPUs = "15%"', "CPUs = potato")
+    broken = good.text.replace('CPUs = 15%', "CPUs = potato")
     decision = cw.evaluate_save(broken, good)
     assert not decision.valid
     assert decision.errors
@@ -203,7 +203,7 @@ def test_odd_linebreak_body_is_rejected_not_adopted(tmp_path):
     # to the loader, or it is rejected -- never "valid to the watcher, broken to
     # the loader".
     good = _good()
-    body = good.text.replace('CPUs = "15%"', "CPUs = 4\x0bRAM = 8192")
+    body = good.text.replace('CPUs = 15%', "CPUs = 4\x0bRAM = 8192")
     decision = cw.evaluate_save(body, good)
     if decision.valid:
         # if the watcher calls it valid, the real loader must ALSO accept the
@@ -231,7 +231,7 @@ def test_legacy_keys_in_live_edit_still_validate():
 def test_watcher_reverts_bad_file_on_disk(tmp_path):
     good = _good()
     path = tmp_path / "hypervisor.cfg"
-    broken = good.text.replace('CPUs = "15%"', "CPUs = nonsense")
+    broken = good.text.replace('CPUs = 15%', "CPUs = nonsense")
     path.write_text(broken)
     watcher = cw.ConfigWatcher(str(path), good, log=lambda m: None)
     decision = watcher.apply_text(broken)
@@ -291,7 +291,7 @@ def test_watcher_thread_reverts_after_a_bad_save(tmp_path):
     watcher.start()
     try:
         # simulate a user saving a broken edit.
-        path.write_text(good.text.replace('RAM = "15%"', "RAM = lots"))
+        path.write_text(good.text.replace('RAM = 15%', "RAM = lots"))
         # give the poll loop a few cycles to notice + revert.
         deadline = _t.time() + 5
         while _t.time() < deadline and "RAM = lots" in path.read_text():
