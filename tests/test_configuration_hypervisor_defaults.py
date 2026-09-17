@@ -158,7 +158,7 @@ def test_configure_status_prints_effective_defaults(tmp_path, monkeypatch, capsy
     assert rc == 0
     out = capsys.readouterr().out
     assert "RAM = 8192" in out             # the override shows (canonical key)
-    assert 'CPUs = "15%"' in out           # a built-in default still shows
+    assert "CPUs = 15%" in out             # a built-in default still shows (unquoted percent)
 
 
 def test_configure_reset_clears_overrides(tmp_path, monkeypatch):
