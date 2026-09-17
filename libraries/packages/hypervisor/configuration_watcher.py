@@ -6,8 +6,8 @@ every save there are exactly two outcomes:
 
   1. VALID   -> the new values are applied; changed keys are split into those
                 applied LIVE (viewer-side toggles) and those that only take
-                effect on the next boot (device topology: ram, cpus, network,
-                usb, shared, disk_size, audio).
+                effect on the next boot (device topology: RAM, CPUs, Network,
+                USB, Shared, Ports, Clipboard, Disk_Size_GB, Audio).
   2. INVALID -> the file is reverted to the LAST-KNOWN-GOOD contents, so a broken
                 edit never bricks the VM.
 
@@ -15,13 +15,12 @@ The accept/revert decision is the PURE function evaluate_save(); it does no I/O
 and is fully unit-tested. ConfigWatcher is the thin thread that reads the file,
 calls evaluate_save(), and either writes the revert or logs+applies the diff.
 
-WHY so few keys apply live: ram/cpus/-m/-smp, the netdev/NIC, the virtiofs share
-and USB host devices are fixed at QEMU launch and cannot be re-plugged safely from a
-config poke; changing them needs a fresh boot. The viewer-side flags
-(fullscreen / ask-before-quit) and audio are host/viewer concerns rather than
-guest device topology, so fullscreen and ask-before-quit are treated as live
-(they re-read on the next viewer action / relaunch); everything else is
-reboot-required and clearly logged as such.
+WHY so few keys apply live: RAM/CPUs/-m/-smp, the netdev/NIC (Network, Ports), the
+virtiofs share, the clipboard channel and USB host devices are fixed at QEMU launch and
+cannot be re-plugged safely from a config poke; changing them needs a fresh boot. The
+viewer-side flags (Fullscreen / Ask_Before_Quitting_Hypervisor) are host/viewer concerns
+rather than guest device topology, so they are treated as live (they re-read on the next
+viewer action / relaunch); everything else is reboot-required and clearly logged as such.
 """
 
 from __future__ import annotations
@@ -48,7 +47,7 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
 # Keys whose change we surface as "applied live" vs "needs a reboot". Anything
 # not listed as live is reboot-required (safe default: never claim a device
 # topology change took effect when it did not).
-_LIVE_KEYS = frozenset({"fullscreen", "ask_before_quitting_hypervisor"})
+_LIVE_KEYS = frozenset({"Fullscreen", "Ask_Before_Quitting_Hypervisor"})
 
 
 @dataclass
@@ -108,11 +107,12 @@ def _parse_text(text: str) -> dict:
 
 
 def _has_known_keys(text: str) -> bool:
-    """True if the body defines at least one recognized (or legacy) setting.
-    Guards against adopting an empty / all-comments / partial-write body as the
-    last-known-good."""
+    """True if the body defines at least one recognized (or legacy) setting. Guards
+    against adopting an empty / all-comments / partial-write body as the last-known-good.
+    Case-insensitive (via canonical_key), so a hand-typed `cpus = ...` counts the same as
+    `CPUs = ...`."""
     raw = configuration._migrate_legacy_keys(_parse_text(text))
-    return any(k in configuration_schema.SCHEMA for k in raw)
+    return any(configuration_schema.canonical_key(k) is not None for k in raw)
 
 
 def _atomic_write(path: str, text: str) -> None:

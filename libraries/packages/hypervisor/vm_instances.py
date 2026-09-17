@@ -26,16 +26,18 @@ import sys
 if __package__:
     from .checks import die
     from .configuration import (
-        DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
-        _vm_name_in_cfg,
+        DEFAULT_SSH_FORWARD_PORT, GUEST_SSH_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text,
+        _slugify, _vm_name_in_cfg, _migrate_legacy_keys,
     )
+    from .configuration_schema import coerce_all
 else:  # loaded flat -- no parent package
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from checks import die  # noqa: E402
     from configuration import (  # noqa: E402
-        DEFAULT_SSH_FORWARD_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text, _slugify,
-        _vm_name_in_cfg,
+        DEFAULT_SSH_FORWARD_PORT, GUEST_SSH_PORT, _HYPERVISOR_CFG_NAME, parse_conf_text,
+        _slugify, _vm_name_in_cfg, _migrate_legacy_keys,
     )
+    from configuration_schema import coerce_all  # noqa: E402
 
 
 def _scan_proc_table() -> list:
@@ -83,22 +85,24 @@ def _pid_cwd(pid: int) -> str:
 
 
 def _cfg_ssh_port(directory: str) -> "int | None":
-    """The forwarded ssh port a VM dir advertises: read ssh / the port straight from
-    its hypervisor.cfg (NOT select_ssh_port, which would BUMP past the now-busy port a
-    running VM already holds and report a wrong number). None when ssh is off or the
-    cfg is unreadable. PURE except for the single file read."""
+    """The forwarded ssh port a VM dir advertises: read Secure_Shell + the 22:host map in
+    Ports straight from its hypervisor.cfg (NOT select_ssh_port, which would BUMP past the
+    now-busy port a running VM already holds and report a wrong number). None when ssh is
+    off or the cfg is unreadable. Goes through the SAME legacy migration + schema coercion
+    as a real load, so a legacy `ssh = true` + `ssh_guest_to_host_port_forward = N` cfg
+    (and a codelis-written one) still reports its port. PURE except for the single read."""
     path = os.path.join(directory, _HYPERVISOR_CFG_NAME)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             raw = parse_conf_text(fh.read())
     except OSError:
         return None
-    ssh = raw.get("ssh", "").strip().lower()
-    if ssh not in ("true", "1", "yes", "on"):
+    coerced, _errors = coerce_all(_migrate_legacy_keys(raw))
+    if not coerced.get("Secure_Shell"):
         return None
-    port = raw.get("ssh_guest_to_host_port_forward", "").strip()
-    if port.isdigit():
-        return int(port)
+    for guest, host in coerced.get("Ports", []):
+        if guest == GUEST_SSH_PORT:
+            return host
     return DEFAULT_SSH_FORWARD_PORT
 
 

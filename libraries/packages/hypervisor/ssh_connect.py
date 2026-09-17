@@ -83,8 +83,8 @@ def do_ssh(cfg: Config, extra: list[str]) -> None:
 
     Requires ssh=true for this VM (that is what forwards guest :22 to the host)."""
     hcfg = cfg.hcfg
-    if not hcfg.ssh:
-        die("ssh is disabled for this VM (ssh=false in hypervisor.cfg). "
+    if not hcfg.secure_shell:
+        die("ssh is disabled for this VM (Secure_Shell=False in hypervisor.cfg). "
             "Enable it and reboot the VM, then: hypervisor ssh")
     port = select_ssh_port(cfg)
     # The guest login name inside the VM. Defaults to the Azzio guest account
