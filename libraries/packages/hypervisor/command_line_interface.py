@@ -44,10 +44,12 @@ Files created here: azzio.qcow2 (disk), OVMF_VARS.4m.fd (UEFI NVRAM),
 shared/ (host<->guest folder), hypervisor.cfg (settings).
 
 USAGE:
-  hypervisor install <file.iso> [--shared] [--ssh[=PORT]] [--share-host-gpu]
+  hypervisor install <file.iso> [--shared] [--ssh[=PORT]] [--clipboard] [--share-host-gpu]
                              Create disk + UEFI NVRAM + hypervisor.cfg (does NOT
                              boot). The ISO argument is REQUIRED. Flags set the
-                             matching hypervisor.cfg toggles on.
+                             matching hypervisor.cfg toggles on. --ssh forwards
+                             guest :22 to host 49156 (or =PORT); --clipboard shares
+                             the clipboard host<->guest.
   hypervisor run <file.qcow2> [--iso <file.iso>] [--headless]
                              Boot the named disk (REQUIRED). --iso attaches an
                              installer ISO for repair or first-time install. An
@@ -72,32 +74,35 @@ USAGE:
                              starts from (this dir's own hypervisor.cfg still wins).
   hypervisor help            This text.
 
-hypervisor.cfg keys (all settings live here -- edit freely; a running VM applies
-edits live where it can, and reverts a file with an invalid value):
-  share_host_gpu                  guest uses the host GPU (shared, not passthrough);
-                                  false = generic software-rendered GPU
-  network                         user (NAT) | none | a host interface to bridge
+hypervisor.cfg keys (all settings live here -- edit freely; True/False, strings quoted;
+a running VM applies edits live where it can, and reverts a file with an invalid value):
+  Share_Host_GPU                  guest uses the host GPU (shared, not passthrough);
+                                  False = generic software-rendered GPU
+  Network                         "user" (NAT) | "none" | a host interface to bridge
                                   (list interfaces: ip -br addr)
-  shared                          false | empty (this dir) | an absolute host path
+  Shared                          False | True (this dir) | an absolute host path
                                   to share into the guest via virtiofs
-  ssh                             forward the guest's SSH port to the host
-  ssh_guest_to_host_port_forward  host port that maps to guest :22 (default {DEFAULT_SSH_FORWARD_PORT})
-  usb                             empty | absolute device path(s) to pass through
+  Clipboard                       share the clipboard host<->guest (SPICE vdagent)
+  Secure_Shell                    forward the guest's SSH port to the host
+  Ports                           guest:host forwards, e.g. "22:49156, 1500:49157"
+                                  (the 22:host map is the ssh forward)
+  USB                             False | absolute device path(s) to pass through
                                   (find them: lsusb, lsblk -o NAME,TRAN,MOUNTPOINT)
-  fullscreen                      borderless exclusive fullscreen
-  ask_before_quitting_hypervisor  prompt before closing the viewer window
-  ram                             MiB of guest RAM, e.g. 16384 (host: free -h)
-  cpus                            vCPU count, do not exceed nproc (host: lscpu)
-  disk_size                       qcow2 disk size (e.g. 200G)
-  audio                           on | off (on = PipeWire; confirm: pactl info)
+  Fullscreen                      borderless exclusive fullscreen
+  Ask_Before_Quitting_Hypervisor  prompt before closing the viewer window
+  RAM                             MiB of guest RAM, or "N%" of host RAM (host: free -h)
+  CPUs                            vCPU count, or "N%" of host CPUs (host: nproc)
+  Disk_Size_GB                    qcow2 disk size in GiB, or "N%" of the host disk
+  Audio                           True | False (True = PipeWire; confirm: pactl info)
 
 ENV OVERRIDES (override hypervisor.cfg at runtime, not persisted):
-  NETWORK  DISK_SIZE  RAM  CPUS  AUDIO  SSHPORT  SHARED  USB
-  SHARE_HOST_GPU=1  SSH=1  FULLSCREEN=1  ASK_QUIT=1  FORCE=1  YES=1  VENUS=1  DRYRUN=1
+  NETWORK  DISK_SIZE_GB  RAM  CPUS  AUDIO  PORTS  SHARED  USB
+  SHARE_HOST_GPU=1  SECURE_SHELL=1  CLIPBOARD=1  FULLSCREEN=1  ASK_QUIT=1
+  FORCE=1  YES=1  VENUS=1  DRYRUN=1   (legacy SSH=1 / SSHPORT / DISK_SIZE still honoured)
 
 EXAMPLE:
   cd ~/Hypervisors/azzio
-  hypervisor install azzio-2026.07.23-x86_64.iso --ssh
+  hypervisor install azzio-2026.07.23-x86_64.iso --ssh --clipboard
   hypervisor run azzio.qcow2 --iso azzio-2026.07.23-x86_64.iso"""
 
 
@@ -196,7 +201,7 @@ def _do_configure(rest: list[str]) -> int:
 
 
 def _parse_install_args(rest: list[str]) -> tuple:
-    """Return (iso_arg, shared, ssh, share_host_gpu, ssh_port) from install args.
+    """Return (iso_arg, shared, ssh, share_host_gpu, ssh_port, clipboard) from install args.
 
     ssh_port is '' unless the user wrote --ssh=PORT or '--ssh PORT'; an empty
     string means "use the hypervisor.cfg default". (USB passthrough has no install
@@ -207,11 +212,14 @@ def _parse_install_args(rest: list[str]) -> tuple:
     ssh = False
     share_host_gpu = False
     ssh_port = ""
+    clipboard = False
     i = 0
     while i < len(rest):
         token = rest[i]
         if token == "--shared":
             shared = True
+        elif token == "--clipboard":
+            clipboard = True
         elif token == "--share-host-gpu":
             share_host_gpu = True
         elif token == "--ssh":
@@ -228,7 +236,7 @@ def _parse_install_args(rest: list[str]) -> tuple:
         elif not iso_arg:
             iso_arg = token
         i += 1
-    return iso_arg, shared, ssh, share_host_gpu, ssh_port
+    return iso_arg, shared, ssh, share_host_gpu, ssh_port, clipboard
 
 
 def _dispatch_run(cfg: Config, rest: list[str]) -> None:

@@ -12,35 +12,62 @@ from __future__ import annotations
 
 import os
 
-from packages.hypervisor.configuration import Config, HypervisorCfg
+from packages.hypervisor.configuration import HypervisorCfg, Config, GUEST_SSH_PORT
 
-# The coerced defaults every test Config starts from (matches _CFG_DEFAULTS' types:
-# bools, ints, usb list, shared union). One place so a schema change does not have to
-# be chased through the per-file factories.
+# The coerced defaults every test Config starts from (matches _CFG_DEFAULTS' types after
+# resolve_sizes: bools, resolved int ram/cpus/disk_size_gb, ports/usb lists, shared union).
+# One place so a schema change does not have to be chased through the per-file factories.
 _HCFG_DEFAULTS = {
     "share_host_gpu": True,
     "network": "user",
     "shared": False,
-    "ssh": False,
-    "ssh_guest_to_host_port_forward": 49156,
+    "clipboard": False,
+    "secure_shell": False,
+    "ports": [],
     "usb": [],
     "fullscreen": False,
     "ask_before_quitting_hypervisor": False,
-    "disk_size": "200G",
+    "disk_size_gb": 200,
     "ram": 16384,
     "cpus": 16,
-    "audio": "on",
+    "audio": True,
 }
+
+# Pre-redesign override names some tests still pass -> translated to the new field(s), so a
+# make_cfg(..., ssh=True) / audio="on" / disk_size="200G" call keeps working unchanged.
+_LEGACY_UNIT_TO_MIB = {"M": 1, "G": 1024, "T": 1024 * 1024}
+
+
+def _translate_legacy_overrides(overrides: dict) -> dict:
+    """Map any legacy override kwargs to the new HypervisorCfg field names/values."""
+    out = dict(overrides)
+    if "ssh" in out:
+        out["secure_shell"] = bool(out.pop("ssh"))
+    if "ssh_guest_to_host_port_forward" in out:
+        port = int(out.pop("ssh_guest_to_host_port_forward"))
+        out.setdefault("ports", [(GUEST_SSH_PORT, port)])
+    if "audio" in out and isinstance(out["audio"], str):
+        out["audio"] = out["audio"].strip().lower() in ("on", "true", "1", "yes")
+    if "disk_size" in out:
+        val = str(out.pop("disk_size")).strip()
+        if val and val[-1].upper() in _LEGACY_UNIT_TO_MIB:
+            mib = int(val[:-1]) * _LEGACY_UNIT_TO_MIB[val[-1].upper()]
+            out.setdefault("disk_size_gb", max(1, -(-mib // 1024)))
+        elif val.isdigit():
+            out.setdefault("disk_size_gb", int(val))
+    return out
 
 
 def make_cfg(directory: str, *, vm: str = "testvm", **hcfg_overrides) -> Config:
     """A Config rooted at `directory` with an overridable HypervisorCfg.
 
-    hcfg_overrides take COERCED values (ssh=True, ram=8192, usb=["/dev/..."],
-    shared="/path" or True/False) -- the same types coerce_all yields.
+    hcfg_overrides take COERCED values (secure_shell=True, ram=8192, usb=["/dev/..."],
+    ports=[(22, 49156)], shared="/path" or True/False, audio=True/False). Legacy override
+    names (ssh=, ssh_guest_to_host_port_forward=, audio="on", disk_size="200G") are
+    translated for back-compat with existing tests.
     """
     vals = dict(_HCFG_DEFAULTS)
-    vals.update(hcfg_overrides)
+    vals.update(_translate_legacy_overrides(hcfg_overrides))
     return Config(
         dir=directory, vm=vm, proc=f"{vm}-vm"[:15],
         # Fixed disk name (azzio.qcow2), not derived from vm slug -- matches

@@ -30,13 +30,28 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
 
 
 def _audio_args(cfg: Config) -> list[str]:
-    """PipeWire duplex audio when audio=on; nothing when off."""
-    if cfg.audio != "on":
+    """PipeWire duplex audio when Audio is True; nothing when False."""
+    if not cfg.audio:
         return []
     return [
         "-audiodev", "pipewire,id=snd0",
         "-device", "ich9-intel-hda,id=hda",
         "-device", "hda-duplex,bus=hda.0,audiodev=snd0",
+    ]
+
+
+def _clipboard_args(cfg: Config) -> list[str]:
+    """The SPICE vdagent channel that carries host<->guest clipboard sharing (and guest
+    display resize), gated on the Clipboard toggle. It rides the always-present
+    virtio-serial bus as a spicevmc chardev exposed on the well-known
+    com.redhat.spice.0 port the guest's spice-vdagent connects to. Off -> no channel,
+    so nothing is shared. The -spice display itself is added unconditionally in
+    build_qemu_argv (the viewer needs it); only the CLIPBOARD channel is optional."""
+    if not cfg.hcfg.clipboard:
+        return []
+    return [
+        "-chardev", "spicevmc,id=vdagent,name=vdagent",
+        "-device", "virtserialport,chardev=vdagent,name=com.redhat.spice.0",
     ]
 
 
@@ -77,21 +92,25 @@ def _memory_args(cfg: Config) -> list[str]:
     ]
 
 
-def _net_args(cfg: Config, port: "int | None") -> list[str]:
+def _net_args(cfg: Config, port_maps: "list | None") -> list[str]:
     """Guest networking from cfg.network:
-      * user       -> QEMU user-mode NAT (+ optional guest :22 hostfwd).
+      * user       -> QEMU user-mode NAT (+ a hostfwd per configured guest:host map).
       * none       -> no NIC at all.
       * <iface>    -> bridge a virtio NIC onto that host interface (needs the
                       iface to be a bridge / qemu-bridge-helper; wifi usually
                       cannot be bridged).
+
+    port_maps is the RESOLVED list of (guest, host) forwards (the ssh 22:host map's host
+    is the bump-aware port do_run picked). Each becomes hostfwd=tcp::<host>-:<guest>.
+    hostfwd only applies to user-mode NAT; a bridge ignores it.
     """
     net = cfg.hcfg.network
     if net == "none":
         return []
     if net == "user":
         netdev = "user,id=net0"
-        if port is not None:
-            netdev += f",hostfwd=tcp::{port}-:22"
+        for guest, host in (port_maps or []):
+            netdev += f",hostfwd=tcp::{host}-:{guest}"
         return ["-netdev", netdev, "-device", "virtio-net-pci,netdev=net0"]
     # a named host interface -> bridged. hostfwd does not apply to a bridge.
     return ["-netdev", f"bridge,id=net0,br={net}",
@@ -115,8 +134,12 @@ def _usb_args(cfg: Config) -> list[str]:
 
 
 def build_qemu_argv(cfg: Config, *, disk: str, gpu_args: list[str],
-                    iso_args: list[str], port: "int | None") -> list[str]:
-    """Assemble the full QEMU command line as an argv list. PURE."""
+                    iso_args: list[str], port_maps: "list | None" = None) -> list[str]:
+    """Assemble the full QEMU command line as an argv list. PURE.
+
+    port_maps is the resolved list of (guest, host) forwards for user-mode networking
+    (see _net_args); None/[] means no forwards. The clipboard channel is added only when
+    the Clipboard toggle is on (see _clipboard_args)."""
     return [
         "qemu-system-x86_64",
         "-name", f"{cfg.vm},process={cfg.proc}",
@@ -133,10 +156,9 @@ def build_qemu_argv(cfg: Config, *, disk: str, gpu_args: list[str],
         *gpu_args,
         "-spice", f"unix=on,addr={cfg.spice_sock},disable-ticketing=on,gl=off,streaming-video=off,playback-compression=off",
         "-device", "virtio-serial-pci",
-        "-chardev", "spicevmc,id=vdagent,name=vdagent",
-        "-device", "virtserialport,chardev=vdagent,name=com.redhat.spice.0",
+        *_clipboard_args(cfg),
         *_shared_args(cfg),
-        *_net_args(cfg, port),
+        *_net_args(cfg, port_maps),
         "-device", "virtio-keyboard-pci",
         "-device", "virtio-tablet-pci",
         "-object", "rng-random,filename=/dev/urandom,id=rng0",

@@ -27,16 +27,23 @@ from dataclasses import dataclass
 # import boundary (backup/passwords use return codes, so they never needed this).
 if __package__:
     from . import configuration_schema
+    from . import host_resources
     from .checks import die
+    from .configuration_schema import Percent
 else:  # loaded flat (run by absolute path via the launcher) -- no parent package
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import configuration_schema  # noqa: E402  (after the sys.path bootstrap above)
+    import host_resources  # noqa: E402
     from checks import die  # noqa: E402
+    from configuration_schema import Percent  # noqa: E402
 
 CODE = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 VARS_TMPL = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
 DEFAULT_SSH_FORWARD_PORT = 49156
+# The guest port the ssh forward targets. `hypervisor install --ssh` writes the default
+# ssh map "22:49156" into Ports, and select_ssh_port reads the host port of the 22 map.
+GUEST_SSH_PORT = 22
 
 _HYPERVISOR_CFG_NAME = "hypervisor.cfg"
 
@@ -44,60 +51,53 @@ _HYPERVISOR_CFG_NAME = "hypervisor.cfg"
 # folder. Referenced by Config.from_cwd() and by resolve_run_disk()'s fallback.
 DISK_NAME = "azzio.qcow2"
 
-# Defaults as already-COERCED Python values (the same types coerce_all yields):
-# bools are bool, ram/cpus/port are int, shared/usb use their union types.
+# Defaults as already-COERCED values (the same types coerce_all yields): bools are bool,
+# strings are str, Ports/USB are lists, and RAM/CPUs/Disk_Size_GB default to a PERCENT of
+# the host (15%) -- resolved to a concrete number per-VM by resolve_sizes().
 _CFG_DEFAULTS: dict = {
-    "share_host_gpu":                 True,
-    "network":                        "user",
-    "shared":                         False,
-    "ssh":                            False,
-    "ssh_guest_to_host_port_forward": DEFAULT_SSH_FORWARD_PORT,
-    "usb":                            [],
-    "fullscreen":                     False,
-    "ask_before_quitting_hypervisor": False,
-    "ram":                            16384,
-    "cpus":                           16,
-    "disk_size":                      "200G",
-    "audio":                          "on",
+    "Share_Host_GPU":                 True,
+    "Network":                        "user",
+    "Shared":                         False,
+    "Clipboard":                      False,
+    "Secure_Shell":                   False,
+    "Ports":                          [],
+    "USB":                            [],
+    "Fullscreen":                     False,
+    "Ask_Before_Quitting_Hypervisor": False,
+    "RAM":                            Percent(15),
+    "CPUs":                           Percent(15),
+    "Disk_Size_GB":                   Percent(15),
+    "Audio":                          True,
 }
 
-# One SHORT, high-level comment per key. Keep it minimal (the user asked: "add a
-# little bit of comments ... high level explanations, and dont over do it").
-# These reference how to inspect the host on an Arch-based system where relevant.
-_CFG_COMMENTS: dict = {
-    "share_host_gpu":
-        "guest renders on the host GPU (shared, not passthrough); false = software",
-    "network":
-        "user (NAT) | none | a host interface to bridge (list them: ip -br addr)",
-    "shared":
-        "false | empty = share this dir | an absolute host path to share (virtiofs)",
-    "ssh":
-        "forward the guest's SSH port to the host",
-    "ssh_guest_to_host_port_forward":
-        "host port that maps to guest :22",
-    "usb":
-        "empty | absolute device path(s) to pass through (find them: lsusb, lsblk -o NAME,TRAN,MOUNTPOINT)",
-    "fullscreen":
-        "borderless exclusive fullscreen instead of a maximized window",
-    "ask_before_quitting_hypervisor":
-        "prompt before the viewer window closes the VM",
-    "ram":
-        "guest RAM in MiB (16384 = 16 GiB); check the host with: free -h",
-    "cpus":
-        "vCPU count pinned as cores; do not exceed the host: nproc",
-    "disk_size":
-        "qcow2 virtual disk size, e.g. 200G (only used when the disk is created)",
-    "audio":
-        "on | off; on = PipeWire on the host (confirm with: pactl info)",
-}
+# The keys whose value can be a Percent, and the host-total each resolves against.
+_PERCENT_KEYS = ("RAM", "CPUs", "Disk_Size_GB")
+
+# A single MINIMAL header block at the top of the generated file (the user asked for the
+# comments to be at the top and as few as possible). No per-key inline comments.
+_CFG_HEADER = (
+    "### hypervisor.cfg -- True/False, strings quoted. RAM/CPUs/Disk_Size_GB: a number or"
+    ' "N%" of the host.\n'
+    '### Network: "user" (NAT) | "none" | a host iface ("ip -br addr"). Ports: guest:host'
+    ' maps ("22:49156, 1500:49157").\n'
+    "### USB: False or device path(s) (\"lsusb\", \"lsblk -o NAME,TRAN,MOUNTPOINT\")."
+    " Edits apply live where they can.\n"
+)
 
 
 def _render_value(key: str, val) -> str:
-    """Render a coerced Python value back to its hypervisor.cfg string form."""
+    """Render a coerced value back to its hypervisor.cfg string form. Bools -> True/False,
+    strings -> quoted, Ports -> "g:h, g2:h2", USB -> space-joined paths, Percent -> "N%"."""
     if isinstance(val, bool):
-        return "true" if val else "false"
-    if isinstance(val, list):
-        return " ".join(val)
+        return "True" if val else "False"
+    if isinstance(val, Percent):
+        return f'"{val.percent}%"'
+    if key == "Ports":
+        return '"' + ", ".join(f"{g}:{h}" for g, h in val) + '"' if val else "False"
+    if key == "USB":
+        return '"' + " ".join(val) + '"' if val else "False"
+    if isinstance(val, str):
+        return f'"{val}"'
     return str(val)
 
 
@@ -118,25 +118,38 @@ def effective_defaults() -> dict:
 
 
 def render_defaults_text(vals: dict) -> str:
-    """Render effective defaults as plain `key = value` lines (schema order), for the
-    `--configure --status` report. Unlike _hypervisor_cfg_text this carries NO comments --
+    """Render effective defaults as plain `Key = value` lines (schema order), for the
+    `--configure --status` report. Unlike _hypervisor_cfg_text this carries NO header --
     it is a status dump, not a generated cfg file."""
     return "".join(f"{key} = {_render_value(key, vals[key])}\n"
                    for key in configuration_schema.KEYS)
 
 
 def _hypervisor_cfg_text(vals: dict) -> str:
-    """Generate hypervisor.cfg text: one '# comment' line then 'key = value' per
-    setting, in schema order. `vals` holds COERCED values (as from _CFG_DEFAULTS
-    or a HypervisorCfg)."""
-    lines: list[str] = []
+    """Generate hypervisor.cfg text: a minimal header block, then one 'Key = value' per
+    setting in schema order. `vals` holds COERCED values (as from _CFG_DEFAULTS or a
+    HypervisorCfg's raw specs)."""
+    lines = [_CFG_HEADER.rstrip("\n"), ""]
     for key in configuration_schema.KEYS:
-        comment = _CFG_COMMENTS.get(key)
-        if comment:
-            lines.append(f"# {comment}")
         lines.append(f"{key} = {_render_value(key, vals[key])}")
-        lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
+    return "\n".join(lines) + "\n"
+
+
+def resolve_sizes(vals: dict, directory: str) -> None:
+    """Turn any Percent RAM/CPUs/Disk_Size_GB in `vals` into a concrete whole number,
+    IN PLACE. RAM -> % of host MiB, CPUs -> % of host logical CPUs, Disk_Size_GB -> % of
+    the total size of the filesystem the VM dir lives on. A plain number is left as-is.
+    Done here (not in the schema) because it needs the host totals and the VM dir, which
+    the pure schema deliberately does not know."""
+    totals = {
+        "RAM": lambda: host_resources.host_total_ram_mib(),
+        "CPUs": lambda: host_resources.host_cpu_count(),
+        "Disk_Size_GB": lambda: host_resources.host_total_disk_gb(directory),
+    }
+    for key in _PERCENT_KEYS:
+        v = vals.get(key)
+        if isinstance(v, Percent):
+            vals[key] = host_resources.resolve_percent(v.percent, totals[key]())
 
 
 @dataclass
@@ -144,15 +157,30 @@ class HypervisorCfg:
     share_host_gpu: bool
     network: str
     shared: "bool | str"
-    ssh: bool
-    ssh_guest_to_host_port_forward: int
+    clipboard: bool
+    secure_shell: bool
+    ports: list          # list of (guest, host) int tuples
     usb: list
     fullscreen: bool
     ask_before_quitting_hypervisor: bool
-    disk_size: str
+    disk_size_gb: int
     ram: int
     cpus: int
-    audio: str
+    audio: bool
+
+    @property
+    def ssh(self) -> bool:
+        """Back-compat alias: ssh is on when the Secure_Shell toggle is on."""
+        return self.secure_shell
+
+    @property
+    def ssh_port(self) -> "int | None":
+        """The host port the guest's :22 forwards to (the host side of the 22:host map in
+        Ports), or None when no such map is configured."""
+        for guest, host in self.ports:
+            if guest == GUEST_SSH_PORT:
+                return host
+        return None
 
     @classmethod
     def from_dir(cls, directory: str) -> "HypervisorCfg":
@@ -170,7 +198,8 @@ class HypervisorCfg:
                 die(f"{_HYPERVISOR_CFG_NAME}: " + "; ".join(errors))
             vals.update(coerced)
         _apply_env_overrides(vals)
-        return cls(**vals)
+        resolve_sizes(vals, directory)
+        return cls(**_as_dataclass_kwargs(vals))
 
     @classmethod
     def write(cls, directory: str, vals: dict) -> str:
@@ -180,26 +209,56 @@ class HypervisorCfg:
         return path
 
 
-# Env overrides mirror the cfg keys (uppercased, with a couple of legacy names).
-# Each raw env string goes through the SAME coercer as the file, so an override
-# is validated exactly like a file value.
-_ENV_OVERRIDES = {
-    "NETWORK":        "network",
-    "DISK_SIZE":      "disk_size",
-    "RAM":            "ram",
-    "CPUS":           "cpus",
-    "AUDIO":          "audio",
-    "SSHPORT":        "ssh_guest_to_host_port_forward",
-    "SHARED":         "shared",
-    "USB":            "usb",
-    "SHARE_HOST_GPU": "share_host_gpu",
-    "SSH":            "ssh",
-    "FULLSCREEN":     "fullscreen",
-    "ASK_QUIT":       "ask_before_quitting_hypervisor",
+# Map the coerced-values dict (canonical Title_Case keys) to the dataclass field names.
+_FIELD_FOR_KEY = {
+    "Share_Host_GPU": "share_host_gpu",
+    "Network": "network",
+    "Shared": "shared",
+    "Clipboard": "clipboard",
+    "Secure_Shell": "secure_shell",
+    "Ports": "ports",
+    "USB": "usb",
+    "Fullscreen": "fullscreen",
+    "Ask_Before_Quitting_Hypervisor": "ask_before_quitting_hypervisor",
+    "RAM": "ram",
+    "CPUs": "cpus",
+    "Disk_Size_GB": "disk_size_gb",
+    "Audio": "audio",
 }
 
-# Legacy 1/0 env flags for booleans: keep the old ergonomics (SHARE_HOST_GPU=1).
-_ENV_BOOL_ONEZERO = {"SHARE_HOST_GPU", "SSH", "FULLSCREEN", "ASK_QUIT"}
+
+def _as_dataclass_kwargs(vals: dict) -> dict:
+    """Translate a coerced {CanonicalKey: value} dict to HypervisorCfg(**kwargs)."""
+    return {_FIELD_FOR_KEY[k]: vals[k] for k in configuration_schema.KEYS}
+
+
+# Env overrides mirror the cfg keys (uppercased), plus a few legacy names kept for
+# ergonomics. Each raw env string goes through the SAME coercer as the file, so an
+# override is validated exactly like a file value.
+_ENV_OVERRIDES = {
+    "NETWORK":        "Network",
+    "DISK_SIZE_GB":   "Disk_Size_GB",
+    "RAM":            "RAM",
+    "CPUS":           "CPUs",
+    "AUDIO":          "Audio",
+    "PORTS":          "Ports",
+    "SHARED":         "Shared",
+    "CLIPBOARD":      "Clipboard",
+    "USB":            "USB",
+    "SHARE_HOST_GPU": "Share_Host_GPU",
+    "SECURE_SHELL":   "Secure_Shell",
+    "FULLSCREEN":     "Fullscreen",
+    "ASK_QUIT":       "Ask_Before_Quitting_Hypervisor",
+    # Legacy env names (pre-redesign) still honoured so existing launchers/scripts work:
+    "SSH":            "Secure_Shell",              # old ssh bool
+    "SSHPORT":        "Ports",                     # old bare ssh port -> the 22:<port> map
+    "DISK_SIZE":      "Disk_Size_GB",              # old "200G"-style size -> normalised to GB below
+}
+
+# Legacy 1/0 env flags for booleans: keep the old ergonomics (SHARE_HOST_GPU=1). All bool
+# coercers already accept "1"/"0", so these need no special path -- listed for clarity.
+_ENV_BOOL_ONEZERO = {"SHARE_HOST_GPU", "SSH", "SECURE_SHELL", "CLIPBOARD",
+                     "FULLSCREEN", "ASK_QUIT"}
 
 
 def _apply_env_overrides(vals: dict) -> None:
@@ -207,13 +266,14 @@ def _apply_env_overrides(vals: dict) -> None:
         raw = os.environ.get(env, "")
         if not raw:
             continue
-        if env in _ENV_BOOL_ONEZERO:
-            vals[key] = raw == "1"
-            continue
+        # DISK_SIZE (legacy) may carry a unit suffix like "200G"; normalise to GB.
+        if env == "DISK_SIZE":
+            raw = str(_legacy_disk_size_to_gb(raw))
         ok, val, err = configuration_schema.coerce_one(key, raw)
         if not ok:
             die(f"{env}: {err} (got '{raw}')")
-        vals[key] = val
+        if val is not None:
+            vals[key] = val
 
 
 def _apply_user_defaults(vals: dict) -> None:
@@ -228,10 +288,12 @@ def _apply_user_defaults(vals: dict) -> None:
         from . import configuration_defaults
     else:  # loaded flat by absolute path via the launcher -- no parent package
         import configuration_defaults  # noqa: E402
-    for key, raw in configuration_defaults.load().items():
+    for key, raw in _migrate_legacy_keys(configuration_defaults.load()).items():
         ok, val, _err = configuration_schema.coerce_one(key, raw)
         if ok and val is not None:
-            vals[key] = val
+            canon = configuration_schema.canonical_key(key)
+            if canon is not None:
+                vals[canon] = val
 
 
 def _slugify(base: str) -> str:
@@ -309,13 +371,18 @@ class Config:
     # convenience aliases into hcfg (read-only after construction). ram/cpus are
     # ints in the cfg; QEMU's -m/-smp take strings, so render them as str here.
     @property
-    def disk_size(self) -> str: return self.hcfg.disk_size
+    def disk_size_gb(self) -> int: return self.hcfg.disk_size_gb
+    @property
+    def disk_size(self) -> str:
+        """The qcow2 size string qemu-img create wants, e.g. '200G' -- disk_size_gb
+        rendered with the G suffix (the cfg now stores whole GiB, not a unit string)."""
+        return f"{self.hcfg.disk_size_gb}G"
     @property
     def ram(self) -> str: return str(self.hcfg.ram)
     @property
     def cpus(self) -> str: return str(self.hcfg.cpus)
     @property
-    def audio(self) -> str: return self.hcfg.audio
+    def audio(self) -> bool: return self.hcfg.audio
     @property
     def share_host_gpu(self) -> bool: return self.hcfg.share_host_gpu
 
@@ -446,14 +513,14 @@ class Config:
 
 
 def parse_conf_text(text: str) -> dict[str, str]:
-    """Parse a KEY=VALUE hypervisor.cfg BODY, stripping '#' comments. The ONE
-    canonical parser -- the live-reload watcher uses this too, so its validation
-    can never disagree with the loader about what a line is. Splits on '\\n' only
-    (NOT str.splitlines(), which also breaks on \\x0b \\x0c \\x85 \\u2028 ... and
-    would let a body pass the watcher yet mis-parse in the loader)."""
+    """Parse a KEY=VALUE hypervisor.cfg BODY, stripping '#' and '###' comments. The ONE
+    canonical parser -- the live-reload watcher uses this too, so its validation can never
+    disagree with the loader about what a line is. Splits on '\\n' only (NOT
+    str.splitlines(), which also breaks on \\x0b \\x0c \\x85 \\u2028 ... and would let a
+    body pass the watcher yet mis-parse in the loader)."""
     out: dict[str, str] = {}
     for raw in text.split("\n"):
-        line = raw.split("#", 1)[0]
+        line = raw.split("#", 1)[0]   # '###' is just '#' repeated -> same split point
         if "=" not in line:
             continue
         k, v = line.split("=", 1)
@@ -467,17 +534,59 @@ def _parse_conf(path: str) -> dict[str, str]:
         return parse_conf_text(fh.read())
 
 
-# Pre-redesign key names, mapped to their current names so an old hypervisor.cfg
-# keeps working. The current name wins if BOTH are present.
-_LEGACY_KEY_ALIASES = {"sshd": "ssh"}
+# Pre-redesign key names, mapped to their current names so an old hypervisor.cfg keeps
+# working. Case-insensitive: matched against the lowercased raw key. The current key
+# wins if BOTH are present. `ssh_guest_to_host_port_forward`'s bare-number value is
+# accepted by _coerce_ports as the 22:<n> ssh map, so codelis -- which still writes that
+# key -- keeps forwarding guest :22 to the same host port with no change on its side.
+_LEGACY_KEY_ALIASES = {
+    "sshd": "Secure_Shell",
+    "ssh": "Secure_Shell",
+    "ssh_guest_to_host_port_forward": "Ports",
+}
+
+# A legacy disk_size value carried a unit suffix (200G / 1024M / 2T). We convert it to
+# whole GiB for the new Disk_Size_GB key (rounding up so a sub-GiB size never becomes 0).
+_LEGACY_DISK_RE = re.compile(r"^\s*([0-9]+)\s*([MGT])\s*$", re.IGNORECASE)
+_UNIT_TO_MIB = {"M": 1, "G": 1024, "T": 1024 * 1024}
+
+
+def _legacy_disk_size_to_gb(value: str) -> int:
+    """Convert a legacy disk_size string (e.g. '200G', '1024M', '2T') to whole GiB. A
+    value that is already a plain number or a percentage is returned unchanged (so the
+    new Disk_Size_GB coercer handles it)."""
+    m = _LEGACY_DISK_RE.match(value or "")
+    if not m:
+        return value  # not a unit string -> let the normal coercer deal with it
+    mib = int(m.group(1)) * _UNIT_TO_MIB[m.group(2).upper()]
+    return max(1, -(-mib // 1024))  # ceil-divide to GiB, floored at 1
 
 
 def _migrate_legacy_keys(raw: dict) -> dict:
-    out = dict(raw)
-    for old, new in _LEGACY_KEY_ALIASES.items():
-        if old in out:
-            old_val = out.pop(old)
-            out.setdefault(new, old_val)   # current name wins if both present
+    """Rewrite a raw {key: value(str)} map so a pre-redesign hypervisor.cfg (or a
+    codelis-written one) loads under the new schema: rename legacy keys to their current
+    names (case-insensitively; current name wins if both are present) and convert a legacy
+    `disk_size = 200G` value to whole GiB. Recognised current keys pass through untouched;
+    the case-insensitive coerce layer maps their casing."""
+    out: dict = {}
+    # First copy through everything, converting a legacy unit-suffixed disk_size value.
+    for key, val in raw.items():
+        low = key.strip().lower()
+        if low in _LEGACY_KEY_ALIASES:
+            continue  # handled below, so an explicit current key can win
+        if low == "disk_size":
+            out.setdefault("Disk_Size_GB", str(_legacy_disk_size_to_gb(val)))
+            continue
+        out[key] = val
+    # Then layer legacy-aliased keys in, without clobbering a current key already present.
+    for key, val in raw.items():
+        low = key.strip().lower()
+        new = _LEGACY_KEY_ALIASES.get(low)
+        if new is None:
+            continue
+        canon_present = any(configuration_schema.canonical_key(k) == new for k in out)
+        if not canon_present:
+            out[new] = val
     return out
 
 
@@ -491,18 +600,19 @@ def _glob_sorted(directory: str, suffix: str) -> list[str]:
 
 
 def select_ssh_port(cfg: Config) -> int:
-    """The forwarded host port for guest :22. Defaults to 49156 (or whatever
-    ssh_guest_to_host_port_forward / SSHPORT is set to); bumps past a port
-    already in use so two VMs never collide. Never climbs past the max valid TCP
-    port (65535) -- if everything up to there is busy it dies cleanly rather than
+    """The forwarded host port for guest :22. Reads the host side of the 22:host map in
+    Ports (or the default 49156 when Secure_Shell is on but no explicit map is set), then
+    bumps past a port already in use so two VMs never collide. Never climbs past the max
+    valid TCP port (65535) -- if everything up to there is busy it dies cleanly rather than
     letting the bump reach 65536 and crash socket.bind (OverflowError)."""
-    port = cfg.hcfg.ssh_guest_to_host_port_forward or DEFAULT_SSH_FORWARD_PORT
+    base = cfg.hcfg.ssh_port or DEFAULT_SSH_FORWARD_PORT
+    port = base
     while port <= configuration_schema._MAX_PORT:
         if not _port_in_use(port):
             return port
         port += 1
-    die(f"no free host port available at or above "
-        f"{cfg.hcfg.ssh_guest_to_host_port_forward} (up to {configuration_schema._MAX_PORT})")
+    die(f"no free host port available at or above {base} "
+        f"(up to {configuration_schema._MAX_PORT})")
 
 
 def _port_in_use(port: int) -> bool:

@@ -30,7 +30,8 @@ def _isolate_config_home(tmp_path, monkeypatch):
     (via a function, not a module constant) so this env override takes effect."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdgcfg"))
     # Make sure a stray real defaults file / env override never leaks into a test.
-    for env in ("RAM", "CPUS", "NETWORK", "AUDIO", "DISK_SIZE"):
+    for env in ("RAM", "CPUS", "NETWORK", "AUDIO", "DISK_SIZE", "DISK_SIZE_GB",
+                "PORTS", "SSH", "SSHPORT", "SECURE_SHELL", "CLIPBOARD"):
         monkeypatch.delenv(env, raising=False)
     return tmp_path
 
@@ -43,10 +44,11 @@ def test_load_missing_file_is_empty():
 
 
 def test_set_then_load_roundtrips_a_valid_key():
+    # a lowercase key is accepted (case-insensitive) and stored under its canonical name.
     ok, err = defaults.set_key("ram", "8192")
     assert ok, err
     assert defaults.exists() is True
-    assert defaults.load() == {"ram": "8192"}
+    assert defaults.load() == {"RAM": "8192"}
 
 
 def test_set_rejects_an_invalid_value_and_writes_nothing():
@@ -67,13 +69,13 @@ def test_set_rejects_an_unknown_key():
 def test_set_accumulates_multiple_keys():
     defaults.set_key("ram", "8192")
     defaults.set_key("network", "none")
-    assert defaults.load() == {"ram": "8192", "network": "none"}
+    assert defaults.load() == {"RAM": "8192", "Network": "none"}
 
 
 def test_set_overwrites_an_existing_key():
     defaults.set_key("ram", "8192")
     defaults.set_key("ram", "4096")
-    assert defaults.load() == {"ram": "4096"}
+    assert defaults.load() == {"RAM": "4096"}
 
 
 def test_reset_removes_the_file():
@@ -123,10 +125,12 @@ def test_env_overrides_user_default(tmp_path, monkeypatch):
 
 
 def test_unset_keys_keep_built_in_defaults(tmp_path):
+    from packages.hypervisor import host_resources as hr
     defaults.set_key("ram", "8192")
     hcfg = HypervisorCfg.from_dir(str(tmp_path))
     assert hcfg.ram == 8192
-    assert hcfg.cpus == 16                 # untouched -> built-in default
+    # untouched -> built-in default (15% of host CPUs, resolved).
+    assert hcfg.cpus == hr.resolve_percent(15, hr.host_cpu_count())
 
 
 # --- the `hypervisor --configure` dispatch ----------------------------------
@@ -135,7 +139,7 @@ def test_configure_set_persists_a_valid_value(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     rc = cli.main(["--configure", "--set", "ram", "8192"])
     assert rc == 0
-    assert defaults.load() == {"ram": "8192"}
+    assert defaults.load() == {"RAM": "8192"}
 
 
 def test_configure_set_rejects_a_bad_value_nonzero_and_writes_nothing(tmp_path, monkeypatch, capsys):
@@ -144,7 +148,7 @@ def test_configure_set_rejects_a_bad_value_nonzero_and_writes_nothing(tmp_path, 
     assert rc != 0
     assert defaults.load() == {}
     err = capsys.readouterr().err
-    assert "cpus" in err
+    assert "CPUs" in err                   # error names the canonical key
 
 
 def test_configure_status_prints_effective_defaults(tmp_path, monkeypatch, capsys):
@@ -153,8 +157,8 @@ def test_configure_status_prints_effective_defaults(tmp_path, monkeypatch, capsy
     rc = cli.main(["--configure", "--status"])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "ram = 8192" in out             # the override shows
-    assert "cpus = 16" in out              # a built-in default still shows
+    assert "RAM = 8192" in out             # the override shows (canonical key)
+    assert 'CPUs = "15%"' in out           # a built-in default still shows
 
 
 def test_configure_reset_clears_overrides(tmp_path, monkeypatch):
@@ -174,4 +178,4 @@ def test_configure_set_does_not_need_a_vm_directory(tmp_path, monkeypatch):
     monkeypatch.chdir(empty)
     rc = cli.main(["--configure", "--set", "audio", "off"])
     assert rc == 0
-    assert defaults.load() == {"audio": "off"}
+    assert defaults.load() == {"Audio": "off"}

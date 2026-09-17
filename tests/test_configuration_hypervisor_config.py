@@ -114,14 +114,20 @@ def test_port_in_use_treats_out_of_range_as_unusable(monkeypatch):
 # --- HypervisorCfg parsing + env override -----------------------------------
 
 def test_cfg_defaults_when_no_file(tmp_path):
+    from packages.hypervisor import host_resources as hr
     hcfg = HypervisorCfg.from_dir(str(tmp_path))
     assert hcfg.share_host_gpu is True
     assert hcfg.network == "user"
-    assert hcfg.ram == 16384                       # int now, not "16384"
+    # RAM/CPUs/Disk_Size_GB default to 15% of the host, resolved to concrete ints.
+    assert hcfg.ram == hr.resolve_percent(15, hr.host_total_ram_mib())
+    assert hcfg.cpus == hr.resolve_percent(15, hr.host_cpu_count())
+    assert isinstance(hcfg.disk_size_gb, int) and hcfg.disk_size_gb >= 1
     assert hcfg.shared is False
+    assert hcfg.clipboard is False                 # new toggle, defaults off
     assert hcfg.usb == []                          # list now, not False
-    assert hcfg.ssh is False                       # renamed from sshd
-    assert hcfg.ssh_guest_to_host_port_forward == 49156
+    assert hcfg.secure_shell is False              # renamed from ssh
+    assert hcfg.ports == []                        # no forwards by default
+    assert hcfg.ssh_port is None
 
 
 def test_cfg_parses_typed_values(tmp_path):

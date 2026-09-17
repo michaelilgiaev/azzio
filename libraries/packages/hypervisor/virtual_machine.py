@@ -28,7 +28,9 @@ if __package__:
     from .checks import die, is_running
     from .configuration import (
         Config, HypervisorCfg, _CFG_DEFAULTS, _hypervisor_cfg_text, select_ssh_port,
+        GUEST_SSH_PORT, DEFAULT_SSH_FORWARD_PORT, _migrate_legacy_keys,
     )
+    from .configuration_schema import coerce_all
     from .graphics import select_render_node
     from .qemu_command import build_qemu_argv  # re-exported: do_run + tests use vm.build_qemu_argv
     # Host-wide `ls` enumeration lives in vm_instances (split for size + concern). Re-exported
@@ -44,7 +46,9 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
     from checks import die, is_running  # noqa: E402
     from configuration import (  # noqa: E402
         Config, HypervisorCfg, _CFG_DEFAULTS, _hypervisor_cfg_text, select_ssh_port,
+        GUEST_SSH_PORT, DEFAULT_SSH_FORWARD_PORT, _migrate_legacy_keys,
     )
+    from configuration_schema import coerce_all  # noqa: E402
     from graphics import select_render_node  # noqa: E402
     from qemu_command import build_qemu_argv  # noqa: E402  re-exported
     # Host-wide `ls` enumeration lives in vm_instances (split for size + concern). Re-exported
@@ -136,7 +140,8 @@ def do_install(cfg: Config, iso_arg: str,
                shared: bool = False,
                ssh: bool = False,
                share_host_gpu: bool = False,
-               ssh_port: str = "") -> None:
+               ssh_port: str = "",
+               clipboard: bool = False) -> None:
     """Create disk + UEFI NVRAM + shared folder + hypervisor.cfg. Does not boot.
     Run 'hypervisor run <disk> --iso <iso>' to boot the installer afterward.
     The ISO argument is mandatory. (USB passthrough is not an install flag -- it
@@ -150,16 +155,20 @@ def do_install(cfg: Config, iso_arg: str,
     checks.require_free_space(cfg)
 
     # --- hypervisor.cfg: write all defaults + requested toggle overrides -----
-    # vals holds COERCED values (bools/ints/lists); the generator renders them.
+    # vals holds COERCED values (bools/lists/Percent); the generator renders them.
     vals = dict(_CFG_DEFAULTS)
-    vals["shared"] = True if shared else False  # True == share the working dir
-    vals["ssh"] = ssh
+    vals["Shared"] = True if shared else False  # True == share the working dir
+    vals["Secure_Shell"] = ssh
+    vals["Clipboard"] = clipboard
     # share_host_gpu defaults ON; only a passed --share-host-gpu is redundant,
     # but honour the flag so it never turns the default off.
     if share_host_gpu:
-        vals["share_host_gpu"] = True
-    if ssh_port:
-        vals["ssh_guest_to_host_port_forward"] = int(ssh_port)
+        vals["Share_Host_GPU"] = True
+    # --ssh implies the default 22:49156 forward; --ssh=PORT (or --ssh PORT) pins the
+    # host side. The Ports list is the ssh map plus any others already defaulted (none).
+    if ssh:
+        host_port = int(ssh_port) if ssh_port else DEFAULT_SSH_FORWARD_PORT
+        vals["Ports"] = [(GUEST_SSH_PORT, host_port)]
     hcfg_path = HypervisorCfg.write(cfg.dir, vals)
     print(f"Config: {hcfg_path}")
 
@@ -297,19 +306,35 @@ def do_run(cfg: Config, install_iso: str = "", headless: bool = False) -> None:
         print(f"WARNING: requested ISO not found, booting without it: {iso}",
               file=sys.stderr)
 
-    port = select_ssh_port(cfg) if hcfg.ssh else None
+    port = select_ssh_port(cfg) if hcfg.secure_shell else None
+    port_maps = _resolve_port_maps(cfg, port)
     _write_viewer_ask_quit(hcfg.ask_before_quitting_hypervisor)
 
     checks.require_not_running(cfg)
     _rm(cfg.spice_sock)
 
-    qemu = build_qemu_argv(cfg, disk=disk, gpu_args=gpu_args, iso_args=iso_args, port=port)
+    qemu = build_qemu_argv(cfg, disk=disk, gpu_args=gpu_args, iso_args=iso_args,
+                           port_maps=port_maps)
 
     if _envflag("DRYRUN"):
         print(" ".join(_shquote(a) for a in qemu))
         return
 
     _launch(cfg, qemu, port, headless=headless)
+
+
+def _resolve_port_maps(cfg: Config, ssh_port: "int | None") -> list:
+    """The (guest, host) forwards QEMU should install for this boot.
+
+    Starts from the cfg's Ports maps, but the guest-:22 map's HOST port is replaced by
+    `ssh_port` -- the bump-aware port select_ssh_port picked (which may differ from the
+    cfg value when the configured port was busy). When Secure_Shell is on but the cfg
+    pinned no explicit 22 map, the resolved ssh forward is still added so `hypervisor ssh`
+    has a port. When Secure_Shell is off, any 22 map is dropped (no ssh forward)."""
+    maps = [(g, h) for (g, h) in cfg.hcfg.ports if g != GUEST_SSH_PORT]
+    if ssh_port is not None:
+        maps.insert(0, (GUEST_SSH_PORT, ssh_port))
+    return maps
 
 
 def _gpu_args(cfg: Config) -> list[str]:
@@ -347,16 +372,29 @@ def _make_snapshot(cfg: Config) -> "configuration_watcher.Snapshot":
     Falls back to a freshly-rendered body if the file is unreadable OR keyless
     (empty / all-comments). A keyless baseline must never be adopted: reverting
     to it would restore an empty file (or be refused), bricking the next boot --
-    the exact failure this feature exists to prevent."""
-    from dataclasses import asdict
-    values = asdict(cfg.hcfg)
+    the exact failure this feature exists to prevent.
+
+    The snapshot VALUES are the coerced-but-UNRESOLVED map (canonical keys, RAM/CPUs/
+    Disk_Size_GB kept as their Percent spec where the file uses one) -- the SAME shape
+    evaluate_save produces from a re-save -- so an identical save is correctly seen as a
+    no-op instead of a spurious change (cfg.hcfg holds resolved ints, which would not
+    match a "15%" re-coerce)."""
     try:
         with open(cfg.hypervisor_cfg_path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
     except OSError:
         text = ""
     if not configuration_watcher._has_known_keys(text):
-        text = _hypervisor_cfg_text(values)
+        # No usable file: render a canonical default body and take its values as baseline.
+        base = dict(_CFG_DEFAULTS)
+        text = _hypervisor_cfg_text(base)
+        values = base
+    else:
+        coerced, _errors = coerce_all(_migrate_legacy_keys(
+            configuration_watcher._parse_text(text)))
+        # Layer over the defaults so keys the file omits still have a baseline value.
+        values = dict(_CFG_DEFAULTS)
+        values.update(coerced)
     return configuration_watcher.Snapshot(values=values, text=text)
 
 
@@ -810,15 +848,16 @@ def do_share_offline(cfg: Config) -> None:
 def do_status(cfg: Config) -> None:
     running = "RUNNING" if is_running(cfg) else "stopped"
     hcfg = cfg.hcfg
-    port = select_ssh_port(cfg) if hcfg.ssh else None
+    port = select_ssh_port(cfg) if hcfg.secure_shell else None
     iso = cfg.find_iso()
     disk_name = os.path.basename(cfg.disk)
     vars_name = os.path.basename(cfg.vars)
     disk = f"{disk_name}  (qcow2)" if os.path.isfile(cfg.disk) else "(none - not installed)"
     uefi = f"{vars_name}  (UEFI NVRAM)" if os.path.isfile(cfg.vars) else "(none)"
-    ssh = f"localhost:{port} -> guest :22" if port is not None else "disabled (ssh=false)"
+    ssh = f"localhost:{port} -> guest :22" if port is not None else "disabled (Secure_Shell=False)"
     shared = cfg.shared_path or "(none)"
     usb = " ".join(hcfg.usb) if hcfg.usb else "(none)"
+    ports = ", ".join(f"{g}:{h}" for g, h in hcfg.ports) if hcfg.ports else "(none)"
     print(f"VM:        {cfg.vm}   (process: {cfg.proc})")
     print(f"Directory: {cfg.dir}")
     print(f"State:     {running}")
@@ -827,12 +866,12 @@ def do_status(cfg: Config) -> None:
     print(f"Shared:    {shared}")
     print(f"ISO:       {iso or '(none in dir)'}")
     print(f"SSH:       {ssh}")
-    print(f"Toggles:   share_host_gpu={hcfg.share_host_gpu}  network={hcfg.network}  "
-          f"shared={hcfg.shared}  ssh={hcfg.ssh}  usb={usb}  "
-          f"fullscreen={hcfg.fullscreen}  "
-          f"ask_before_quitting_hypervisor={hcfg.ask_before_quitting_hypervisor}")
-    print(f"Hardware:  ram={cfg.ram} cpus={cfg.cpus} "
-          f"disk_size={cfg.disk_size} audio={cfg.audio}")
+    print(f"Toggles:   Share_Host_GPU={hcfg.share_host_gpu}  Network={hcfg.network}  "
+          f"Shared={hcfg.shared}  Clipboard={hcfg.clipboard}  Secure_Shell={hcfg.secure_shell}  "
+          f"Ports={ports}  USB={usb}  Fullscreen={hcfg.fullscreen}  "
+          f"Ask_Before_Quitting_Hypervisor={hcfg.ask_before_quitting_hypervisor}")
+    print(f"Hardware:  RAM={cfg.ram} CPUs={cfg.cpus} "
+          f"Disk_Size_GB={cfg.disk_size_gb} Audio={hcfg.audio}")
 
 
 def _target_cfg(cfg: Config, arg: str) -> Config:

@@ -69,7 +69,14 @@ def load() -> dict:
             raw = configuration.parse_conf_text(fh.read())
     except OSError:
         return {}
-    return {k: v for k, v in raw.items() if k in configuration_schema.SCHEMA}
+    # Keep only recognised settings, re-keyed to the CANONICAL Title_Case name (so a file
+    # written in any casing, or with a legacy key, still resolves through the schema).
+    out = {}
+    for k, v in raw.items():
+        canon = configuration_schema.canonical_key(k)
+        if canon is not None:
+            out[canon] = v
+    return out
 
 
 def save(overrides: dict) -> str:
@@ -92,14 +99,15 @@ def set_key(key: str, raw: str) -> tuple[bool, str]:
     defaults file. Returns (ok, error): ok=False leaves the file UNTOUCHED and error is a
     human message (unknown key, or the coercer's reason). Persists the RAW string (not the
     coerced value) so the file stays in the same textual form as a hypervisor.cfg."""
-    if key not in configuration_schema.SCHEMA:
+    canon = configuration_schema.canonical_key(key)
+    if canon is None:
         known = ", ".join(configuration_schema.KEYS)
         return False, f"unknown key: {key} (known keys: {known})"
-    ok, _val, err = configuration_schema.coerce_one(key, raw)
+    ok, _val, err = configuration_schema.coerce_one(canon, raw)
     if not ok:
-        return False, f"{key}: {err} (got '{raw}')"
+        return False, f"{canon}: {err} (got '{raw}')"
     overrides = load()
-    overrides[key] = raw.strip()
+    overrides[canon] = raw.strip()
     save(overrides)
     return True, ""
 
