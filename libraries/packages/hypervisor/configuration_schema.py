@@ -28,6 +28,7 @@ Type model (per key):
   shared   : Shared               (False | True/empty = working dir | /abs/path)
   usb      : USB                  (False/empty | /dev/... [more /dev/...])
   ports    : Ports                (guest:host maps; the 22:host map is the ssh forward)
+  port     : Ssh_Forward_Port     (the BASE host port the guest's :22 forward starts from)
   int|pct  : RAM, CPUs, Disk_Size_GB   (a whole number, or "N%" of the host total)
 """
 
@@ -152,6 +153,17 @@ def _coerce_audio(raw):
     return _coerce_bool(raw)
 
 
+def _coerce_forward_port(raw):
+    """A single TCP port (1..65535): the BASE host port the guest's :22 forward starts
+    from. select_ssh_port uses it as the floor and bumps +1 past any port a running VM
+    already holds, so the Nth concurrent VM lands on base+N-1. Quotes are optional on
+    input (Ssh_Forward_Port = 49350 and = "49350" both parse), matching the other keys."""
+    s = _as_str(raw)
+    if s is None:
+        return False, None, f"must be a whole number in 1..{_MAX_PORT}"
+    return _coerce_port_number(_unquote(s))
+
+
 # A plausible Linux network-interface name: letters, digits, and . _ - @ (no
 # whitespace, no slash). Covers eno1, enp5s0, wlan0, br0, vlan.10, bond0.
 _IFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]*$")
@@ -257,6 +269,7 @@ SCHEMA = {
     "Clipboard":                      _coerce_bool,
     "Secure_Shell":                   _coerce_bool,
     "Ports":                          _coerce_ports,
+    "Ssh_Forward_Port":               _coerce_forward_port,
     "USB":                            _coerce_usb,
     "Fullscreen":                     _coerce_bool,
     "Ask_Before_Quitting_Hypervisor": _coerce_bool,

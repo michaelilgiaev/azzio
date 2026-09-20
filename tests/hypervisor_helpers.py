@@ -24,6 +24,7 @@ _HCFG_DEFAULTS = {
     "clipboard": False,
     "secure_shell": False,
     "ports": [],
+    "ssh_forward_port": 49350,
     "usb": [],
     "fullscreen": False,
     "ask_before_quitting_hypervisor": False,

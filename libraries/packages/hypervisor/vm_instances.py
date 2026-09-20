@@ -85,12 +85,19 @@ def _pid_cwd(pid: int) -> str:
 
 
 def _cfg_ssh_port(directory: str) -> "int | None":
-    """The forwarded ssh port a VM dir advertises: read Secure_Shell + the 22:host map in
-    Ports straight from its hypervisor.cfg (NOT select_ssh_port, which would BUMP past the
-    now-busy port a running VM already holds and report a wrong number). None when ssh is
-    off or the cfg is unreadable. Goes through the SAME legacy migration + schema coercion
-    as a real load, so a legacy `ssh = true` + `ssh_guest_to_host_port_forward = N` cfg
-    (and a codelis-written one) still reports its port. PURE except for the single read."""
+    """The forwarded ssh port a VM dir advertises: read Secure_Shell + the base from its
+    hypervisor.cfg (NOT select_ssh_port, which would BUMP past the now-busy port a running VM
+    already holds and report a wrong number). The base is, in order: an explicit "22:host" map
+    in Ports, else the Ssh_Forward_Port key (the manager's floor -- so a VM installed with a
+    custom `--ssh=PORT` reports PORT, not the built-in default), else DEFAULT_SSH_FORWARD_PORT.
+    None when ssh is off or the cfg is unreadable. Goes through the SAME legacy migration +
+    schema coercion as a real load, so a legacy `ssh = true` + `ssh_guest_to_host_port_forward
+    = N` cfg (and a codelis-written one) still reports its port. PURE except for the one read.
+
+    NOTE (bare `hypervisor run`): the package does not persist the bump-chosen port back to the
+    cfg, so a non-codelis VM that bumped to base+1 still advertises the base here -- the same
+    approximation the pre-manager code had. codelis pins the real port into the cfg before boot
+    (pin_ssh_port), so codelis-driven instances -- the multi-instance case -- report exactly."""
     path = os.path.join(directory, _HYPERVISOR_CFG_NAME)
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -103,7 +110,7 @@ def _cfg_ssh_port(directory: str) -> "int | None":
     for guest, host in coerced.get("Ports", []):
         if guest == GUEST_SSH_PORT:
             return host
-    return DEFAULT_SSH_FORWARD_PORT
+    return coerced.get("Ssh_Forward_Port") or DEFAULT_SSH_FORWARD_PORT
 
 
 def _running_instances(proc_table: "list | None" = None) -> list:
