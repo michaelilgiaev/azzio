@@ -28,7 +28,7 @@ if __package__:
     from .checks import die, is_running
     from .configuration import (
         Config, HypervisorCfg, _CFG_DEFAULTS, _hypervisor_cfg_text, select_ssh_port,
-        GUEST_SSH_PORT, DEFAULT_SSH_FORWARD_PORT, _migrate_legacy_keys,
+        GUEST_SSH_PORT, _migrate_legacy_keys,
     )
     from .configuration_schema import coerce_all
     from .graphics import select_render_node
@@ -46,7 +46,7 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
     from checks import die, is_running  # noqa: E402
     from configuration import (  # noqa: E402
         Config, HypervisorCfg, _CFG_DEFAULTS, _hypervisor_cfg_text, select_ssh_port,
-        GUEST_SSH_PORT, DEFAULT_SSH_FORWARD_PORT, _migrate_legacy_keys,
+        GUEST_SSH_PORT, _migrate_legacy_keys,
     )
     from configuration_schema import coerce_all  # noqa: E402
     from graphics import select_render_node  # noqa: E402
@@ -164,11 +164,15 @@ def do_install(cfg: Config, iso_arg: str,
     # but honour the flag so it never turns the default off.
     if share_host_gpu:
         vals["Share_Host_GPU"] = True
-    # --ssh implies the default 22:49156 forward; --ssh=PORT (or --ssh PORT) pins the
-    # host side. The Ports list is the ssh map plus any others already defaulted (none).
-    if ssh:
-        host_port = int(ssh_port) if ssh_port else DEFAULT_SSH_FORWARD_PORT
-        vals["Ports"] = [(GUEST_SSH_PORT, host_port)]
+    # --ssh turns Secure_Shell on and leaves the forward BASE at Ssh_Forward_Port (default
+    # 49350); select_ssh_port bumps +1 per already-running VM, so N concurrent guests cascade
+    # 49350, 49351, ... with no per-install pinning. --ssh=PORT (or --ssh PORT) instead sets
+    # that base to PORT (still the floor the cascade climbs from). We write the base into the
+    # Ssh_Forward_Port key, NOT a hard "22:PORT" map -- a hard map would peg every instance to
+    # the same host port and defeat the manager. (An explicit "22:host" map a user hand-edits
+    # into Ports still wins in select_ssh_port for the rare fixed-port case.)
+    if ssh and ssh_port:
+        vals["Ssh_Forward_Port"] = int(ssh_port)
     hcfg_path = HypervisorCfg.write(cfg.dir, vals)
     print(f"Config: {hcfg_path}")
 

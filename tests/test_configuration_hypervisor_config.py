@@ -77,29 +77,59 @@ def test_vm_name_in_cfg_ignores_env(tmp_path, monkeypatch):
 
 # --- select_ssh_port --------------------------------------------------------
 
-def test_select_ssh_port_defaults_to_49156(monkeypatch):
+def _no_running_vms(monkeypatch):
+    """Stub the enumeration select_ssh_port consults so a test host that happens to have
+    a hypervisor VM running (or none) never perturbs the port maths. Patched on the module
+    select_ssh_port actually imports lazily -- packages.hypervisor.vm_instances."""
+    from packages.hypervisor import vm_instances
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda proc_table=None: [])
+
+
+def test_select_ssh_port_defaults_to_49350(monkeypatch):
+    _no_running_vms(monkeypatch)
     monkeypatch.setattr(config, "_port_in_use", lambda p: False)
     cfg = _make_cfg("testvm")
     assert select_ssh_port(cfg) == DEFAULT_SSH_FORWARD_PORT
-    assert DEFAULT_SSH_FORWARD_PORT == 49156
+    assert DEFAULT_SSH_FORWARD_PORT == 49350
 
 
 def test_select_ssh_port_bumps_past_a_used_port(monkeypatch):
+    _no_running_vms(monkeypatch)
     busy = {DEFAULT_SSH_FORWARD_PORT}
     monkeypatch.setattr(config, "_port_in_use", lambda p: p in busy)
     cfg = _make_cfg("testvm")
     assert select_ssh_port(cfg) == DEFAULT_SSH_FORWARD_PORT + 1
 
 
-def test_ssh_port_override_wins(monkeypatch):
+def test_ssh_forward_port_cfg_key_sets_the_base(monkeypatch):
+    # The Ssh_Forward_Port key is the manager's floor when no explicit 22:host map is set.
+    _no_running_vms(monkeypatch)
     monkeypatch.setattr(config, "_port_in_use", lambda p: False)
-    cfg = _make_cfg("testvm", ssh_port=2222)
-    assert select_ssh_port(cfg) == 2222
+    cfg = _make_cfg("testvm", ssh_forward_port=50000)
+    assert select_ssh_port(cfg) == 50000
+
+
+def test_select_ssh_port_increments_per_running_vm(monkeypatch):
+    # The core of the port-forward manager: the Nth concurrent VM lands on base+N-1 because
+    # each already-running VM's advertised port is treated as claimed (deterministic even
+    # before a guest's sshd binds). Two VMs already hold 49350 + 49351 -> a third gets 49352.
+    from packages.hypervisor import vm_instances
+    monkeypatch.setattr(config, "_port_in_use", lambda p: False)  # nothing bound
+    running = [
+        {"vm": "a", "pid": 1, "dir": "/vm/a", "ssh_port": 49350},
+        {"vm": "b", "pid": 2, "dir": "/vm/b", "ssh_port": 49351},
+    ]
+    monkeypatch.setattr(vm_instances, "_running_instances", lambda proc_table=None: running)
+    assert select_ssh_port(_make_cfg("c", directory="/vm/c")) == 49352
+    # A relaunch of an already-running dir keeps its OWN port (its dir is excluded from the
+    # claimed set), instead of bumping off itself.
+    assert select_ssh_port(_make_cfg("a", directory="/vm/a")) == 49350
 
 
 def test_select_ssh_port_does_not_climb_past_max(monkeypatch):
     # If the bump loop reached 65536 it would crash socket.bind (OverflowError).
     # With everything up to the max busy, select_ssh_port must fail CLEANLY.
+    _no_running_vms(monkeypatch)
     monkeypatch.setattr(config, "_port_in_use", lambda p: True)  # every port busy
     cfg = _make_cfg("testvm", ssh_port=65535)
     with pytest.raises(HypervisorError):
@@ -284,5 +314,11 @@ def test_resolve_run_disk_missing_named_file_raises(tmp_path):
 
 # --- helpers ----------------------------------------------------------------
 
-def _make_cfg(vm: str, *, directory: str = "/d", ssh_port: int = 49156) -> Config:
-    return make_cfg(directory, vm=vm, ssh_guest_to_host_port_forward=ssh_port)
+def _make_cfg(vm: str, *, directory: str = "/d", ssh_port: "int | None" = None,
+              ssh_forward_port: int = DEFAULT_SSH_FORWARD_PORT) -> Config:
+    # ssh_port (when given) is an EXPLICIT 22:host pin (a legacy bare-number Ports map);
+    # left None it stays unset so select_ssh_port falls through to the Ssh_Forward_Port base
+    # (the new port-forward manager's floor), which ssh_forward_port sets.
+    if ssh_port is not None:
+        return make_cfg(directory, vm=vm, ssh_guest_to_host_port_forward=ssh_port)
+    return make_cfg(directory, vm=vm, ssh_forward_port=ssh_forward_port)

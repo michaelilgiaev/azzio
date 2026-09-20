@@ -40,9 +40,11 @@ else:  # loaded flat (run by absolute path via the launcher) -- no parent packag
 CODE = "/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 VARS_TMPL = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
-DEFAULT_SSH_FORWARD_PORT = 49156
-# The guest port the ssh forward targets. `hypervisor install --ssh` writes the default
-# ssh map "22:49156" into Ports, and select_ssh_port reads the host port of the 22 map.
+DEFAULT_SSH_FORWARD_PORT = 49350
+# The guest port the ssh forward targets. `hypervisor install --ssh` turns on Secure_Shell
+# and the base host port comes from the Ssh_Forward_Port key (default 49350); select_ssh_port
+# starts from that base and bumps +1 past any port a running VM already holds, so the Nth
+# concurrent VM lands on base+N-1. An explicit "22:host" map in Ports still overrides the base.
 GUEST_SSH_PORT = 22
 
 _HYPERVISOR_CFG_NAME = "hypervisor.cfg"
@@ -61,6 +63,7 @@ _CFG_DEFAULTS: dict = {
     "Clipboard":                      False,
     "Secure_Shell":                   False,
     "Ports":                          [],
+    "Ssh_Forward_Port":               DEFAULT_SSH_FORWARD_PORT,
     "USB":                            [],
     "Fullscreen":                     False,
     "Ask_Before_Quitting_Hypervisor": False,
@@ -162,6 +165,7 @@ class HypervisorCfg:
     clipboard: bool
     secure_shell: bool
     ports: list          # list of (guest, host) int tuples
+    ssh_forward_port: int  # BASE host port for the guest :22 forward (select_ssh_port's floor)
     usb: list
     fullscreen: bool
     ask_before_quitting_hypervisor: bool
@@ -219,6 +223,7 @@ _FIELD_FOR_KEY = {
     "Clipboard": "clipboard",
     "Secure_Shell": "secure_shell",
     "Ports": "ports",
+    "Ssh_Forward_Port": "ssh_forward_port",
     "USB": "usb",
     "Fullscreen": "fullscreen",
     "Ask_Before_Quitting_Hypervisor": "ask_before_quitting_hypervisor",
@@ -602,19 +607,53 @@ def _glob_sorted(directory: str, suffix: str) -> list[str]:
 
 
 def select_ssh_port(cfg: Config) -> int:
-    """The forwarded host port for guest :22. Reads the host side of the 22:host map in
-    Ports (or the default 49156 when Secure_Shell is on but no explicit map is set), then
-    bumps past a port already in use so two VMs never collide. Never climbs past the max
-    valid TCP port (65535) -- if everything up to there is busy it dies cleanly rather than
-    letting the bump reach 65536 and crash socket.bind (OverflowError)."""
-    base = cfg.hcfg.ssh_port or DEFAULT_SSH_FORWARD_PORT
+    """The forwarded host port for guest :22 -- the SSH port-forward manager.
+
+    The base (floor) is, in order: an explicit "22:host" map in Ports (a user pin always
+    wins), else this VM's Ssh_Forward_Port cfg key, else the built-in DEFAULT_SSH_FORWARD_PORT
+    (49350). From that floor we bump +1 past every port ALREADY CLAIMED so two VMs never
+    share one host port: a port is "claimed" if a running hypervisor VM's cfg advertises it
+    (so the first VM gets the base, the second base+1, the Nth base+N-1 -- deterministic even
+    before a guest's sshd is up), OR if a live socket is already bound there (belt-and-braces
+    against non-VM listeners and the same-instant TOCTOU). Never climbs past the max valid TCP
+    port (65535) -- if everything up to there is taken it dies cleanly rather than letting the
+    bump reach 65536 and crash socket.bind (OverflowError)."""
+    base = cfg.hcfg.ssh_port or cfg.hcfg.ssh_forward_port or DEFAULT_SSH_FORWARD_PORT
+    claimed = _ports_claimed_by_running_vms(exclude_dir=cfg.dir)
     port = base
     while port <= configuration_schema._MAX_PORT:
-        if not _port_in_use(port):
+        if port not in claimed and not _port_in_use(port):
             return port
         port += 1
     die(f"no free host port available at or above {base} "
         f"(up to {configuration_schema._MAX_PORT})")
+
+
+def _ports_claimed_by_running_vms(exclude_dir: str = "") -> set:
+    """The set of host ssh ports every OTHER running hypervisor VM already advertises, so a
+    new VM bumps past them and the Nth concurrent VM lands on base+N-1. Reads each running
+    VM's cfg via the enumeration backend (vm_instances._running_instances) -- imported
+    LAZILY here because vm_instances imports THIS module (a top-level import would be a
+    cycle). `exclude_dir` drops this VM's own dir so a relaunch of an already-running dir
+    does not treat its own pinned port as a conflict. Best-effort: any error (no /proc,
+    a test stub) degrades to an empty set, so port selection still works -- it just loses
+    the cross-instance bump and falls back to the live-socket probe alone."""
+    try:
+        if __package__:
+            from . import vm_instances
+        else:  # loaded flat by absolute path via the launcher -- no parent package
+            import vm_instances  # noqa: E402
+        exclude = os.path.realpath(exclude_dir) if exclude_dir else ""
+        claimed = set()
+        for inst in vm_instances._running_instances():
+            if exclude and os.path.realpath(inst.get("dir", "")) == exclude:
+                continue
+            port = inst.get("ssh_port")
+            if port is not None:
+                claimed.add(port)
+        return claimed
+    except Exception:
+        return set()
 
 
 def _port_in_use(port: int) -> bool:

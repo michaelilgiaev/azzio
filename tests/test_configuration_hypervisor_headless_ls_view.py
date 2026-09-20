@@ -261,6 +261,23 @@ def test_cfg_ssh_port_defaults_when_no_port_line(tmp_path):
     assert vm_instances._cfg_ssh_port(str(d)) == vm_instances.DEFAULT_SSH_FORWARD_PORT
 
 
+def test_cfg_ssh_port_honours_custom_forward_base(tmp_path):
+    # A VM installed with `--ssh=PORT` records Ssh_Forward_Port (no explicit 22:host map);
+    # ls/enumeration must report THAT base, not the built-in default.
+    d = tmp_path
+    with open(d / "hypervisor.cfg", "w", encoding="utf-8") as fh:
+        fh.write("Secure_Shell = True\nSsh_Forward_Port = 50123\n")
+    assert vm_instances._cfg_ssh_port(str(d)) == 50123
+
+
+def test_cfg_ssh_port_explicit_map_wins_over_forward_base(tmp_path):
+    # An explicit 22:host pin always wins over the Ssh_Forward_Port base.
+    d = tmp_path
+    with open(d / "hypervisor.cfg", "w", encoding="utf-8") as fh:
+        fh.write('Secure_Shell = True\nSsh_Forward_Port = 50123\nPorts = "22:51999"\n')
+    assert vm_instances._cfg_ssh_port(str(d)) == 51999
+
+
 def test_cfg_ssh_port_none_when_unreadable(tmp_path):
     assert vm_instances._cfg_ssh_port(str(tmp_path / "does_not_exist")) is None
 

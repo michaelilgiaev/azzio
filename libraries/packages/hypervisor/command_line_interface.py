@@ -48,8 +48,9 @@ USAGE:
                              Create disk + UEFI NVRAM + hypervisor.cfg (does NOT
                              boot). The ISO argument is REQUIRED. Flags set the
                              matching hypervisor.cfg toggles on. --ssh forwards
-                             guest :22 to host 49156 (or =PORT); --clipboard shares
-                             the clipboard host<->guest.
+                             guest :22 to host Ssh_Forward_Port (49350 by default,
+                             +1 per already-running VM; =PORT sets the base);
+                             --clipboard shares the clipboard host<->guest.
   hypervisor run <file.qcow2> [--iso <file.iso>] [--headless]
                              Boot the named disk (REQUIRED). --iso attaches an
                              installer ISO for repair or first-time install. An
@@ -85,7 +86,9 @@ a running VM applies edits live where it can, and reverts a file with an invalid
   Clipboard                       share the clipboard host<->guest (SPICE vdagent)
   Secure_Shell                    forward the guest's SSH port to the host
   Ports                           guest:host forwards, e.g. "22:49156, 1500:49157"
-                                  (the 22:host map is the ssh forward)
+                                  (an explicit 22:host map pins the ssh forward)
+  Ssh_Forward_Port                BASE host port the guest :22 forward starts from
+                                  (49350 default; +1 per already-running VM)
   USB                             False | absolute device path(s) to pass through
                                   (find them: lsusb, lsblk -o NAME,TRAN,MOUNTPOINT)
   Fullscreen                      borderless exclusive fullscreen
