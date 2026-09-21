@@ -195,6 +195,12 @@ rclone
 qemu-full
 edk2-ovmf
 virt-viewer
+# bash-completion: provides the completion ENGINE + lazy loader that /etc/bash.bashrc
+# sources, which reads /usr/share/bash-completion/completions/ on first TAB. The
+# `hypervisor` command ships its completion there via packages/hypervisor/packaging.py
+# emit_plan(); without this package nothing loads it, so `hypervisor <TAB>` is dead.
+# Named explicitly because the baseline releng image does not pull it in. NOT from the AUR.
+bash-completion
 go
 zip
 unzip

@@ -50,15 +50,18 @@ EXPECTED_KEY_PLAN = {
 def test_emit_plan_dest_mode_table():
     """The declarative (dest -> mode) entries compiler.py iterates. The launcher MUST be
     executable (0o755) so typing `hypervisor` runs it; every module is plain data (0o644,
-    run through the launcher's python). Pin the key entries + the two structural rules:
-    every non-launcher entry is a 0o644 .py under LIB_DIR, and the build wiring never
-    ships."""
+    run through the launcher's python); the bash completion is also 0o644 but lands in the
+    system completion dir (NOT LIB_DIR). Pin the key entries + the structural rules: every
+    entry that is neither the launcher nor the completion is a 0o644 .py under LIB_DIR, and
+    the build wiring never ships."""
     got = {e["dest"]: e["mode"] for e in hv.emit_plan()}
     for dest, mode in EXPECTED_KEY_PLAN.items():
         assert got.get(dest) == mode, dest
     for dest, mode in got.items():
         if dest == hv.LAUNCHER_SYSTEM_PATH:
             assert mode == 0o755, dest
+        elif dest == hv.COMPLETION_SYSTEM_PATH:
+            assert mode == 0o644, dest  # completion ships to the system completion dir
         else:
             assert dest.startswith(hv.LIB_DIR + "/") and dest.endswith(".py"), dest
             assert mode == 0o644, dest
@@ -84,11 +87,16 @@ def test_emit_plan_is_pure():
 
 
 def test_dest_paths_are_absolute_system_paths():
-    """All root-owned absolute paths under /usr/local (the OFFLINE install rsyncs the live
-    rootfs, so no per-user home entry is needed -- the command is on PATH for every
-    user)."""
+    """All root-owned absolute system paths (the OFFLINE install rsyncs the live rootfs, so
+    no per-user home entry is needed -- the command is on PATH for every user). The app and
+    launcher live under /usr/local; the bash completion lands in the distro's system
+    completion dir under /usr/share, where the loader looks for it."""
     for e in hv.emit_plan():
-        assert e["dest"].startswith("/usr/local/"), e["dest"]
+        dest = e["dest"]
+        if dest == hv.COMPLETION_SYSTEM_PATH:
+            assert dest.startswith("/usr/share/bash-completion/completions/"), dest
+        else:
+            assert dest.startswith("/usr/local/"), dest
 
 
 def test_launcher_name_is_the_hypervisor_command():

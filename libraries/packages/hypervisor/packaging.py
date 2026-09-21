@@ -29,15 +29,20 @@ Layers:
       qemu_command.py                 the pure QEMU argv assembler
       virtual_machine.py              install/run/share/status/stop logic
       packaging.py                    THIS module -- install paths, launcher, emit_plan()
+      completion.bash                 bash completion (data file; shipped to the system
+                                      completion dir, NOT swept into LIB_DIR)
   * INSTALLED layout (root-owned), all flat in LIB_DIR:
       /usr/local/lib/azzio-hypervisor/command_line_interface.py       the `hypervisor` entry script
       /usr/local/lib/azzio-hypervisor/<module>.py  every runtime module (flat)
       /usr/local/bin/hypervisor                     the launcher (execs command_line_interface.py)
+      /usr/share/bash-completion/completions/hypervisor   the bash completion (from completion.bash)
 
 Runtime dependencies (system binaries the app shells out to): `qemu-system-x86_64`
 and `qemu-img` (qemu-full) to run/create the VM, the OVMF UEFI firmware (edk2-ovmf),
 `remote-viewer` (virt-viewer) for the display, and `pgrep` (procps-ng, in base) for
-the running-state check -- the first three are named in the manifest. python itself is
+the running-state check -- the first three are named in the manifest. `bash-completion`
+is also in the manifest: it provides the loader that reads the completion.bash this
+module ships to /usr/share/bash-completion/completions/hypervisor. python itself is
 already present; everything else the app uses is Python standard library. No systemd
 service: `hypervisor` is an interactive command, launched on demand.
 """
@@ -68,6 +73,16 @@ ENTRY_SYSTEM_PATH = f"{LIB_DIR}/command_line_interface.py"
 # would otherwise normalise it to 0644 on the squashfs).
 LAUNCHER_SYSTEM_PATH = "/usr/local/bin/hypervisor"
 
+# The bash completion for `hypervisor`, shipped to the SYSTEM completion dir (root-owned,
+# under /usr/share so the OFFLINE install's unpackfs rsync carries it to the target). The
+# bash-completion lazy loader looks up a file named after the command in this dir on first
+# TAB, so the basename MUST be exactly `hypervisor`. The source is completion.bash beside
+# these modules (a DATA file, not a .py, so _shipped_module_names() does not sweep it into
+# LIB_DIR -- it ships only via its explicit emit_plan() entry). The `bash-completion`
+# package (which provides the loader, sourced by /etc/bash.bashrc) is named in the manifest.
+COMPLETION_SOURCE_NAME = "completion.bash"
+COMPLETION_SYSTEM_PATH = "/usr/share/bash-completion/completions/hypervisor"
+
 # --- Which source files ship (in the repo) ----------------------------------
 # The app is a flat directory, so we ship every .py in it EXCEPT this build wiring.
 # Discovering the set (rather than listing each module) means adding or removing a
@@ -92,6 +107,14 @@ def _shipped_module_names() -> list[str]:
 def _read_source(name: str) -> str:
     """Read one of the app's Python sources verbatim from the hypervisor package dir."""
     return (paths.HYPERVISOR_DIR / name).read_text(encoding="utf-8")
+
+
+def completion_bash() -> str:
+    """The bash completion script installed to COMPLETION_SYSTEM_PATH, read verbatim
+    from completion.bash beside the sources (late, so an edit to that file is always
+    reflected -- same contract as _ModuleBuilder). It is a hand-tuned data file, not a
+    module, so it is kept as its own file rather than generated from Python here."""
+    return _read_source(COMPLETION_SOURCE_NAME)
 
 
 class _ModuleBuilder:
@@ -163,4 +186,5 @@ def emit_plan() -> list[dict]:
         for name in _shipped_module_names()
     ]
     plan.append({"builder": launcher_sh, "dest": LAUNCHER_SYSTEM_PATH, "mode": _EXEC})
+    plan.append({"builder": completion_bash, "dest": COMPLETION_SYSTEM_PATH, "mode": _CONF})
     return plan
