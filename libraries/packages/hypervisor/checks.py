@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 
 
 class HypervisorError(Exception):
@@ -79,21 +78,51 @@ def require_virtiofsd() -> None:
 
 
 def is_running(cfg) -> bool:
-    """True if a process whose comm matches the VM's PROC name is alive.
+    """True if THIS instance's VM (the QEMU whose cwd IS cfg.dir) is alive.
 
-    Mirrors `pgrep -x "$PROC"`: an EXACT match against the (15-char-capped)
-    process comm, so two VMs in two dirs never see each other as running.
+    A bare `pgrep -x "$PROC"` is NOT enough: the comm is f"{slug}-vm" capped to the
+    kernel's 15-char limit, so the slug is trimmed to 12 chars before "-vm" is appended
+    (see configuration._proc_name). Two DIFFERENT dirs whose slugs share a 12-char prefix
+    -- e.g. any two `codelis-claud*` instances -- collapse to the SAME comm 'codelis-clau-vm'.
+    So do EVERY unrelated process that merely happens to carry that comm (a stale orphan QEMU
+    from a since-deleted cwd, or anything named that way). A comm-only match then reports "VM
+    already running" for a process that is NOT this instance's -- and because `stop`/teardown
+    act by DIRECTORY/disk-path, they cannot kill that foreign process, so the launch deadlocks
+    on "already running" forever. This is exactly the wedge codelis hit when a same-prefix or
+    orphaned VM was present on the host.
+
+    The fix: a match counts ONLY when the process's comm matches cfg.proc AND its working
+    directory (/proc/<pid>/cwd) resolves to cfg.dir -- the SAME dir-is-identity rule
+    vm_instances._running_instances and `stop` already use. Two VMs in two dirs (even with a
+    colliding truncated comm) no longer see each other, and a foreign/stale comm can never
+    stand in for this instance. Reads /proc directly (no pgrep dependency).
     """
+    want_dir = os.path.realpath(cfg.dir)
     try:
-        subprocess.run(
-            ["pgrep", "-x", cfg.proc],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
+        pids = [n for n in os.listdir("/proc") if n.isdigit()]
+    except OSError:
         return False
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as fh:
+                comm = fh.read().strip()
+        except OSError:
+            continue
+        if comm != cfg.proc:
+            continue
+        # Recover the process cwd the same way vm_instances._pid_cwd does, INCLUDING the
+        # kernel's " (deleted)" suffix strip so a VM whose dir was removed while it still
+        # runs is still recognised as this instance's (its disk-path teardown can then act).
+        try:
+            target = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            continue
+        deleted = " (deleted)"
+        if target.endswith(deleted):
+            target = target[: -len(deleted)]
+        if os.path.realpath(target) == want_dir:
+            return True
+    return False
 
 
 def require_not_running(cfg) -> None:
