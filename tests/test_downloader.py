@@ -129,12 +129,15 @@ def test_missing_from_repo_empty_when_repo_covers_manifest(monkeypatch, tmp_path
 
 # --- download retry / archive-server back-off -------------------------------
 #
-# archive.archlinux.org rate-limits aggressive parallel pulls: a 1.8 GiB transaction
-# at ParallelDownloads=5 trips its abuse throttle mid-download ("too many errors from
-# archive.archlinux.org, ... failed to retrieve some files"). Because `pacman -Sw
-# --cachedir` is resumable, the cure is to RETRY, each attempt gentler on the server
-# (fewer parallel streams) with a back-off pause between. _download_with_retry() is
-# the pure orchestration of that ladder, injectable so it needs no real pacman/sleep.
+# archive.archlinux.org is slow and flaky: it rate-limits aggressive parallel pulls AND
+# serves individual files at a crawl. Per-file stall/abort/retry recovery now lives in the
+# conf's curl XferCommand (pacman._DOWNLOAD_XFERCOMMAND), which also serializes downloads.
+# _download_with_retry() is the coarse WHOLE-TRANSACTION retry around that: if a full
+# `pacman -Sw` still returns non-zero, pause and run it again (up to len(ladder) attempts).
+# Because `pacman -Sw --cachedir` is resumable, each retry re-fetches only what is missing.
+# It is the pure orchestration of that loop, injectable so it needs no real pacman/sleep.
+# (The ladder values are still passed to ParallelDownloads for compat, but that line is
+# inert while XferCommand is set -- what these tests pin is the attempt count and backoff.)
 
 def test_download_retry_succeeds_first_try_uses_max_parallelism():
     # A clean success on the first attempt runs exactly once, at the top of the ladder,
@@ -169,6 +172,17 @@ def test_download_retry_ladder_is_monotonically_gentler():
     assert len(ladder) >= 2
     assert ladder == tuple(sorted(ladder, reverse=True))
     assert ladder[-1] == 1                                  # gentlest possible: fully serial
+
+
+def test_download_retry_ladder_is_patient_enough_to_ride_out_a_flap():
+    # The single archive origin FLAPS (unreachable for a minute or two, then recovers), and
+    # curl's own per-file retries only span ~25s -- so the OUTER ladder must have enough
+    # attempts AND enough total backoff to outlast a multi-minute outage instead of throwing
+    # away a resumable, nearly-complete download. Guard both: >= 6 attempts and >= 3 minutes
+    # of cumulative backoff across the retries.
+    assert len(downloader._PARALLEL_LADDER) >= 6
+    assert len(downloader._RETRY_BACKOFF) == len(downloader._PARALLEL_LADDER) - 1
+    assert sum(downloader._RETRY_BACKOFF) >= 180
 
 
 def test_download_retry_raises_after_exhausting_ladder():

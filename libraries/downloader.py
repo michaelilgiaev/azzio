@@ -29,22 +29,40 @@ import paths
 
 ProgressCb = Callable[[int], None]
 
-# Parallel-download back-off ladder for the `pacman -Sw` cache fetch.
+# Whole-transaction retry-with-backoff ladder for the `pacman -Sw` cache fetch.
 #
-# archive.archlinux.org (the PINNED snapshot host -- see pacman.ARCH_SNAPSHOT) rate-
-# limits aggressive parallel pulls: a full ~1.8 GiB transaction at 5 streams reliably
-# trips its abuse throttle partway through ("too many errors from archive.archlinux.org
-# ... failed to retrieve some files ... download library error"). Because `pacman -Sw
-# --cachedir` is RESUMABLE (finished packages are durable, partial files continue), the
-# fix is simply to retry -- each attempt gentler on the server: 5 streams, then 2, then
-# 1 (fully serial). Monotonically non-increasing so we never hammer the host harder
-# after it has already complained. Each retry re-fetches only what is still missing.
-_PARALLEL_LADDER = (5, 2, 1)
+# archive.archlinux.org (the PINNED snapshot host -- see pacman.ARCH_SNAPSHOT) is both
+# slow and flaky: it rate-limits aggressive parallel pulls ("too many errors ... download
+# library error") AND serves individual files at a crawl. The conf now fetches through a
+# curl XferCommand with per-file stall/abort/retry recovery (pacman.download_conf /
+# _DOWNLOAD_XFERCOMMAND), which also means downloads are SERIAL -- so the old
+# per-attempt parallelism no longer varies the transfer. This ladder is therefore a coarse
+# retry-with-backoff around curl's own per-file retries: if a whole `pacman -Sw` still
+# comes back non-zero (e.g. curl exhausted its retries on a package while the host was
+# having a bad minute), pause and run it again. Because `pacman -Sw --cachedir` is RESUMABLE
+# (finished packages are durable, partial files continue via curl -C -), each retry
+# re-fetches only what is still missing. The values are passed to ParallelDownloads for
+# documentation/compat but are inert while XferCommand is set (see download_conf); what
+# matters is the RETRY COUNT and the backoff between the attempts.
+#
+# SIX attempts, not three: the single archive origin does not just throttle -- it FLAPS
+# (goes refuse-connections/unreachable for a minute or two, then recovers; observed as
+# "curl: (7) Failed to connect ... Could not connect to server" for a whole ladder run
+# even though the host was fine seconds before and after). curl's own 5 per-file retries
+# only span ~25s, so a flap outlasts them and fails the whole -Sw; the OUTER ladder is what
+# rides out a multi-minute outage. Because `pacman -Sw --cachedir` is resumable, each extra
+# rung is nearly free (it re-fetches only what is still missing), so we trade a few cheap
+# retries for surviving a transient origin outage instead of throwing away a 90%-complete
+# download. The trailing 1s are just "run it again" -- parallelism is inert under XferCommand.
+_PARALLEL_LADDER = (5, 2, 1, 1, 1, 1)
 
 # Seconds to pause before the Nth retry (index 0 == the pause after the first failure).
-# A short, growing back-off gives the archive's throttle a moment to relax without
-# stalling the build for long. len == ladder-1: there is no pause after the last rung.
-_RETRY_BACKOFF = (10, 30)
+# A growing back-off gives a throttling OR flapping archive origin time to recover; the later
+# rungs wait up to a minute so the ladder as a whole rides out a ~3-4 minute outage rather
+# than hammering a downed host. len == ladder-1: there is no pause after the last rung.
+# Cumulative pause is ~3.5 min (15+30+45+60+60), so with curl's own per-file retries the
+# ladder as a whole rides out a multi-minute origin outage.
+_RETRY_BACKOFF = (15, 30, 45, 60, 60)
 
 
 class PackageError(RuntimeError):
@@ -229,7 +247,8 @@ def _sync_and_download(sudo, dlconf, gpgdir, pkg_db, pkg_repo, progress, phase=l
     # reach the log.
     rc = logstream.run_teed(
         sudo + ["pacman", "-Sy", "--config", str(dlconf), "--gpgdir", str(gpgdir),
-                "--dbpath", str(pkg_db), "--cachedir", str(pkg_repo), "--noconfirm"],
+                "--dbpath", str(pkg_db), "--cachedir", str(pkg_repo), "--noconfirm",
+                "--disable-download-timeout"],
     )
     if rc != 0:
         if any((pkg_db / "sync").iterdir()):
@@ -260,9 +279,14 @@ def _sync_and_download(sudo, dlconf, gpgdir, pkg_db, pkg_repo, progress, phase=l
         # --assume-installed <dep> for every name our own (not-yet-built) packages provide, so the
         # dep is satisfied without downloading the stock Arch package (see ASSUME_INSTALLED).
         assume = [arg for name in ASSUME_INSTALLED for arg in ("--assume-installed", name)]
+        # --disable-download-timeout relaxes pacman's built-in CONNECT timeout for the slow
+        # archive host (the Dockerfile passes it for the same reason). The mid-transfer
+        # slow-crawl abort -- the actual "Operation too slow" break -- is handled by the
+        # conf's curl XferCommand (pacman.download_conf), not this flag.
         return logstream.run_teed(
             sudo + ["pacman", "-Sw", "--config", str(dlconf), "--gpgdir", str(gpgdir),
-                    "--noconfirm", "--cachedir", str(pkg_repo), "--dbpath", str(pkg_db)]
+                    "--noconfirm", "--disable-download-timeout",
+                    "--cachedir", str(pkg_repo), "--dbpath", str(pkg_db)]
             + assume + pkgs,
         )
 

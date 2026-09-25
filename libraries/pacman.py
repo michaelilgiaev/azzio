@@ -349,15 +349,69 @@ def _net_repos(multilib: bool) -> str:
     return block
 
 
+# --- stall-recovery curl downloader for the package-cache fetch --------------
+# The PINNED archive host (archive.archlinux.org) does not just throttle aggressive
+# PARALLEL pulls ("too many errors ...") -- it also serves INDIVIDUAL files arbitrarily
+# slowly, and pacman's built-in libcurl downloader has no low-speed abort, so one crawling
+# file stalls the whole transaction until it eventually errors the entire `pacman -Sw`
+# with "failed retrieving file '<pkg>' ... Operation too slow. Less than 1 bytes/sec
+# transferred the last 10 seconds" -> "download library error" (the exact break this fixes:
+# it died on kpmcore). pacman's own --disable-download-timeout only relaxes the CONNECT
+# timeout; it does nothing about a mid-transfer crawl.
+#
+# The cure is the SAME one makepkg already uses for its source-tarball DLAGENTS (see
+# makepkg._RETRY_FLAGS / _harden_dlagents): drive the fetch through curl with
+#   -4                                   force IPv4. archive.archlinux.org publishes BOTH an
+#                                        A and a AAAA record, but a Docker container has an
+#                                        IPv6 address it cannot ROUTE, so curl's default
+#                                        dual-stack tries the AAAA first and burns its whole
+#                                        connect timeout failing over to IPv4 on EVERY file --
+#                                        which, when the single archive origin is also having a
+#                                        slow moment, tips the connect into a hard timeout
+#                                        ("curl: (7) Failed to connect ... Could not connect to
+#                                        server"). Pinning IPv4 skips the dead IPv6 path
+#                                        entirely. (The build host reaches the archive fine over
+#                                        IPv4; only the container's unroutable IPv6 was the trap.)
+#   --speed-time 30 --speed-limit 1024   abort a transfer stuck under 1 KB/s for 30s
+#                                        (turns a slow-crawl-to-death into a FAST failure)
+#   --connect-timeout 30                 cap a single connect attempt so a flapping origin fails
+#                                        fast into the retry instead of hanging for minutes
+#   --retry 5 --retry-delay 5 --retry-all-errors   curl itself retries that failure (and any
+#                                        other, incl. mid-stream resets / connect refusals)
+#                                        against a fresh connection, up to 5 times, before giving up
+#   -C -                                 RESUME a partial file (pairs with pacman's resumable
+#                                        --cachedir: a retried package continues, not restarts)
+#   -f                                   fail on HTTP >=400 (so a 404/503 is an error, not a
+#                                        saved error page) -- matches Arch's stock agent
+#   -L                                   follow redirects
+# pacman substitutes %u -> URL and %o -> the output cache path.
+#
+# NOTE: setting XferCommand DISABLES pacman's internal ParallelDownloads (parallelism only
+# exists in the built-in downloader), so every package is fetched SERIALLY by curl. That is
+# fine and in fact GENTLER on the throttling archive -- it is exactly what the download
+# retry ladder's final rung was already forcing (see downloader._PARALLEL_LADDER). The outer
+# ladder now serves as a coarse whole-transaction retry-with-backoff around curl's own
+# per-file retries; the ParallelDownloads line is kept (harmless, documents intent) but is
+# inert while XferCommand is set.
+_DOWNLOAD_XFERCOMMAND = (
+    "/usr/bin/curl -4 -L -C - -f "
+    "--connect-timeout 30 "
+    "--retry 5 --retry-delay 5 --retry-all-errors "
+    "--speed-time 30 --speed-limit 1024 "
+    "-o %o %u"
+)
+
+
 def download_conf(parallel_downloads: int = 5) -> str:
     """Host-independent configuration for the package-cache download step (cache-pkgs).
 
     parallel_downloads controls the ParallelDownloads line. It defaults to 5, but the
     download retry (downloader._sync_and_download) regenerates this config with a LOWER
-    value on each attempt: archive.archlinux.org throttles aggressive parallel pulls
-    ("too many errors from archive.archlinux.org"), and pacman exposes ParallelDownloads
-    ONLY through the config file -- there is no CLI flag -- so backing off means
-    re-emitting the config.
+    value on each attempt. NOTE: ParallelDownloads is INERT here because this conf also
+    sets an XferCommand (curl) -- see _DOWNLOAD_XFERCOMMAND -- and pacman disables parallel
+    downloading whenever XferCommand is set. The line is retained (harmless) so the intent
+    is documented and so re-enabling the built-in downloader is a one-line change; the
+    actual stall/throttle recovery now lives in curl's flags, not in the parallelism knob.
 
     Fetches from a PINNED Arch Linux Archive snapshot (ARCH_SNAPSHOT) and never Includes
     the host mirrorlist, so the fetch behaves identically on Manjaro, real Arch, and
@@ -386,6 +440,10 @@ Architecture      = x86_64
 HoldPkg           = pacman glibc
 CheckSpace
 ParallelDownloads = {parallel_downloads}
+# Fetch every package through curl with stall/retry recovery so one slow file from the
+# throttling archive host cannot hang or abort the whole download (see
+# _DOWNLOAD_XFERCOMMAND). Setting this disables pacman's internal parallel downloader.
+XferCommand       = {_DOWNLOAD_XFERCOMMAND}
 SigLevel          = Never
 LocalFileSigLevel = Never
 # Intentionally NO 'DownloadUser = alpm': pacman runs as root here and writes into

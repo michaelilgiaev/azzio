@@ -39,6 +39,48 @@ def test_download_conf_has_no_active_download_user():
         assert not code.startswith("DownloadUser"), line
 
 
+def test_download_conf_sets_curl_xfercommand_with_stall_recovery():
+    # The archive host serves individual files arbitrarily slowly and pacman's built-in
+    # downloader has no low-speed abort, so one crawling file (observed: kpmcore) hangs and
+    # then aborts the whole `pacman -Sw` with "Operation too slow. Less than 1 bytes/sec".
+    # The conf must route the fetch through curl with the SAME stall-recovery flags makepkg
+    # uses for its source tarballs so a stalled transfer fails fast, retries, and resumes.
+    conf = pacman.download_conf()
+    xfer = next((l for l in conf.splitlines()
+                 if l.split("#", 1)[0].strip().startswith("XferCommand")), None)
+    assert xfer is not None, "download_conf must set an XferCommand for stall recovery"
+    assert "curl" in xfer
+    # Force IPv4: the archive host has an unroutable-from-container AAAA record, and curl's
+    # default dual-stack burns its connect timeout on IPv6 before failing over -- the exact
+    # trap behind "curl: (7) Failed to connect ... Could not connect to server" in Docker.
+    assert " -4 " in f" {xfer} "
+    # Cap a single connect so a flapping origin fails fast into the retry, not a long hang.
+    assert "--connect-timeout 30" in xfer
+    # Fast-fail a transfer stuck under 1 KB/s for 30s (the decisive fix for the crawl).
+    assert "--speed-time 30" in xfer
+    assert "--speed-limit 1024" in xfer
+    # curl retries that (and any other) error itself, against a fresh connection.
+    assert "--retry 5" in xfer
+    assert "--retry-all-errors" in xfer
+    # Resume a partial file (pairs with pacman's resumable --cachedir) and fail on HTTP errors.
+    assert "-C -" in xfer
+    assert "-f" in xfer
+    # pacman's substitution tokens must be present so the URL/output actually flow to curl.
+    assert "%u" in xfer and "%o" in xfer
+
+
+def test_download_conf_stall_recovery_matches_makepkg_speed_flags():
+    # The pacman download and makepkg source-fetch defend against the SAME archive-host
+    # slow-crawl, so their low-speed abort threshold must stay identical -- if one is tuned,
+    # the other should move with it. Guard that the speed-time/speed-limit pair agrees.
+    import makepkg
+    xfer = next(l for l in pacman.download_conf().splitlines()
+                if l.split("#", 1)[0].strip().startswith("XferCommand"))
+    flags = " ".join(makepkg._RETRY_FLAGS)
+    assert "--speed-time 30" in flags and "--speed-time 30" in xfer
+    assert "--speed-limit 1024" in flags and "--speed-limit 1024" in xfer
+
+
 # --- build_profile_conf: mkarchiso's internal pacstrap ---------------------
 
 def test_build_profile_conf_injects_cachedir():
