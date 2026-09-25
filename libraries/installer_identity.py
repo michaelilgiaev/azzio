@@ -257,6 +257,13 @@ def identity_chroot_sh() -> str:
                      sshd-hypervisor-setup unit for $az_login so the INSTALLED box brings sshd up
                      at boot for the chosen account (the live session is unaffected).
 
+    When the account was renamed away from `main`, the baked references keyed on /home/main are
+    re-pointed to the new home so nothing dangles or re-creates the old dir: the first-boot unit +
+    script, the getty autologin drop-in, and the virtiofs shared-folder mount unit
+    (home-main-Shared.mount -> home-$login-Shared.mount, with its Where= and enable-link). Leaving
+    the mount unit un-repointed was what re-created a stale /home/main on the installed system,
+    since systemd auto-creates a .mount unit's Where= parent directory at boot.
+
     Password files are removed immediately after use so no plaintext survives on the target."""
     return f"""
 # --- Apply the collected identity (hostname / user / passwords / timezone) ---
@@ -399,6 +406,33 @@ EOF
         az_getty=/etc/systemd/system/getty@tty1.service.d/autologin.conf
         [ -f "$az_getty" ] \\
             && sed -i "s/--autologin {DEFAULT_USERNAME}/--autologin $az_login/g" "$az_getty"
+
+        # SHARED-FOLDER MOUNT UNIT re-point. The clone carries the virtiofs auto-mount unit
+        # home-{DEFAULT_USERNAME}-Shared.mount (system.HOME_MAIN_SHARED_MOUNT,
+        # Where=/home/{DEFAULT_USERNAME}/Shared) AND its enable-link under
+        # multi-user.target.wants. systemd CREATES a mount unit's Where= directory if it is
+        # missing -- so on the installed box's first boot this enabled unit re-materialises
+        # /home/{DEFAULT_USERNAME} (as the parent of .../Shared) even when the virtiofs mount
+        # itself no-ops on a VM booted without --shared. That is the leftover `/home/{DEFAULT_USERNAME}`
+        # seen ALONGSIDE the renamed /home/$az_login. systemd additionally REQUIRES a .mount unit's
+        # filename to encode its Where= (/home/$login/Shared -> home-$login-Shared.mount), so an
+        # in-place Where= rewrite alone would make systemd reject the unit. We therefore RENAME the
+        # unit file to match the moved home, rewrite its Where=, and move the enable-link to the new
+        # name -- so the share mounts at /home/$az_login/Shared and no stale /home/{DEFAULT_USERNAME}
+        # is ever created. No-op on the default install ({DEFAULT_USERNAME}) -- nothing moved.
+        az_mount_old=/etc/systemd/system/home-{DEFAULT_USERNAME}-Shared.mount
+        # systemd escapes each path segment; for these plain lowercase names the unit name is
+        # simply the slash-separated path with '/' -> '-' and the leading '/' dropped.
+        az_mount_new="/etc/systemd/system/home-$az_login-Shared.mount"
+        az_wants=/etc/systemd/system/multi-user.target.wants
+        if [ -f "$az_mount_old" ]; then
+            sed -i "s#/home/{DEFAULT_USERNAME}/Shared#/home/$az_login/Shared#g" "$az_mount_old"
+            mv "$az_mount_old" "$az_mount_new"
+            # Re-point the enable-link at the renamed unit (the link's own filename must match
+            # the unit filename too, so replace it rather than just retarget the old name).
+            rm -f "$az_wants/home-{DEFAULT_USERNAME}-Shared.mount"
+            ln -sf "$az_mount_new" "$az_wants/home-$az_login-Shared.mount"
+        fi
     fi
 fi
 """
