@@ -326,6 +326,29 @@ def test_chroot_repoints_getty_autologin_after_rename():
     assert 'if [ "$az_login" != "main" ]; then' in s
 
 
+def test_chroot_repoints_shared_mount_unit_after_rename():
+    # THE `/home/main` LEFTOVER bug: the clone carries the enabled virtiofs mount unit
+    # home-main-Shared.mount (system.HOME_MAIN_SHARED_MOUNT, Where=/home/main/Shared). systemd
+    # auto-creates a .mount unit's Where= PARENT dir at boot, so an un-repointed unit re-creates
+    # /home/main on the installed system ALONGSIDE the renamed /home/$login. The chroot must, when
+    # the home moved, rewrite the unit's Where= AND rename the unit file + its enable-link (systemd
+    # requires the filename to encode Where=), so the share lands at /home/$login/Shared and no
+    # stale /home/main is ever created.
+    s = idy.identity_chroot_sh()
+    # The old unit file/link (home-main-Shared.mount) is what gets renamed away.
+    assert "home-main-Shared.mount" in s
+    # Where= is rewritten from the old home to the resolved login's home.
+    assert "s#/home/main/Shared#/home/$az_login/Shared#g" in s
+    # The unit file is RENAMED (not just its contents edited) to the login-keyed name...
+    assert 'mv "$az_mount_old" "$az_mount_new"' in s
+    assert 'az_mount_new="/etc/systemd/system/home-$az_login-Shared.mount"' in s
+    # ...and the enable-link is re-created under the matching filename (stale one removed).
+    assert "rm -f \"$az_wants/home-main-Shared.mount\"" in s
+    assert 'ln -sf "$az_mount_new" "$az_wants/home-$az_login-Shared.mount"' in s
+    # Only in the rename branch (no-op when the login stays `main`).
+    assert 'if [ "$az_login" != "main" ]; then' in s
+
+
 # --- ssh-on-the-installed-system (`azzioinstall --instant|--cli --ssh=<pw>`) --------
 
 def test_collect_reads_ssh_and_uses_it_as_password_fallback():
