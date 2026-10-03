@@ -102,8 +102,8 @@ What the medium can do, grouped by the role each component plays. Counts and siz
 | Shell & CLI tools | 32 | 77.3 MiB | interactive shells, terminal editors, pagers, multiplexers, and everyday command-line utilities |
 | Desktop app | 7 | 454.2 MiB | graphical end-user applications shipped on the medium |
 | GUI toolkit/framework | 29 | 561.1 MiB | the widget toolkits and UI frameworks graphical apps are built on |
-| Graphics & display | 112 | 922.6 MiB | the X11 display server, Mesa/Vulkan drivers, and display configuration |
-| Audio | 44 | 51.2 MiB | the audio server and mixer/control tooling |
+| Graphics & display | 112 | 923.6 MiB | the X11 display server, Mesa/Vulkan drivers, and display configuration |
+| Audio | 44 | 51.3 MiB | the audio server and mixer/control tooling |
 | Networking | 37 | 131.8 MiB | connection management, wireless, VPN, SSH, DNS, and network diagnostics |
 | Storage & filesystems | 46 | 85.3 MiB | partitioning, RAID/LVM, encryption setup, and filesystem/imaging tooling |
 | Security & crypto | 18 | 76.5 MiB | the host firewall, full-disk encryption, TPM/FIDO/smartcard, and OpenPGP |
