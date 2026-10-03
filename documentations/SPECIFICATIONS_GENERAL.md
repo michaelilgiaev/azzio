@@ -8,8 +8,8 @@ Technical, developer-facing specification of the Azzio Linux distribution. It is
 
 - **Base distribution:** Arch Linux (rolling), x86_64
 - **Live session:** Openbox live session; getty autologin -> startx -> openbox-session, auto-launches Calamares
-- **Kernel:** `linux` 7.2.4.arch1-2
-- **Init:** `systemd` 261.3-1
+- **Kernel:** `linux` 7.2.8.arch1-2
+- **Init:** `systemd` 262-1
 - **Display manager / session:** None -- getty autologin to startx (no display manager)
 - **ISO versioning:** date-based, YYYY.MM.DD (no semver)
 - **Live-session writable RAM (`cow_spacesize`):** 4G writable overlay held in RAM
@@ -17,15 +17,15 @@ Technical, developer-facing specification of the Azzio Linux distribution. It is
 
 | Metric | Value |
 |---|---:|
-| Explicit manifest entries | 259 (274 non-comment lines; 15 duplicate lines de-duped) |
-| Explicit entries incl. group members (e.g. `xorg`) | 256 |
-| **Full package set (transitive closure)** | **1243** |
-| &nbsp;&nbsp;from `core` / `extra` / `multilib` | 229 / 925 / 89 |
-| Edition: Azzio Component / Stock Arch | 745 / 498 |
-| Top / leaf packages (nothing depends on them) | 177 |
+| Explicit manifest entries | 260 (275 non-comment lines; 15 duplicate lines de-duped) |
+| Explicit entries incl. group members (e.g. `xorg`) | 257 |
+| **Full package set (transitive closure)** | **1242** |
+| &nbsp;&nbsp;from `core` / `extra` / `multilib` | 229 / 923 / 90 |
+| Edition: Azzio Component / Stock Arch | 746 / 496 |
+| Top / leaf packages (nothing depends on them) | 178 |
 | Base / sink packages (depend on nothing else in the set) | 78 |
 | Deepest dependency chain (leaf -> base) | 38 hops |
-| Total installed size of the package set | 22.64 GiB |
+| Total installed size of the package set | 23.07 GiB |
 
 **Edition tags** (used throughout, and marked on the component graph):
 
@@ -38,7 +38,7 @@ Technical, developer-facing specification of the Azzio Linux distribution. It is
 
 ## 2. Base and identity
 
-Azzio is [Arch Linux](https://archlinux.org) -- rolling release, `x86_64` -- with a curated package set and Azzio branding/configuration on top. Every package comes unmodified from the official Arch repositories; Arch's own documentation, the [ArchWiki](https://wiki.archlinux.org), applies directly. The kernel is `linux` 7.2.4.arch1-2 and the init system is `systemd` 261.3-1. The medium is versioned date-based, YYYY.MM.DD (no semver).
+Azzio is [Arch Linux](https://archlinux.org) -- rolling release, `x86_64` -- with a curated package set and Azzio branding/configuration on top. Every package comes unmodified from the official Arch repositories; Arch's own documentation, the [ArchWiki](https://wiki.archlinux.org), applies directly. The kernel is `linux` 7.2.8.arch1-2 and the init system is `systemd` 262-1. The medium is versioned date-based, YYYY.MM.DD (no semver).
 
 Identity is set through `/usr/lib/os-release`: `NAME="Azzio Linux"` with `ID=arch` and `ID_LIKE=arch` kept deliberately -- so tooling that keys off `ID` still treats the system as Arch -- `BUILD_ID=rolling`, and `HOME_URL` pointing at the project repository. The branding is presentational; the system remains Arch underneath.
 
@@ -96,26 +96,26 @@ What the medium can do, grouped by the role each component plays. Counts and siz
 
 | Category | Components | Installed size | Provides |
 |---|---:|---:|---|
-| Kernel & firmware | 34 | 1.34 GiB | the Linux kernel, CPU microcode, and device firmware blobs |
-| Boot & init | 14 | 123.3 MiB | boot loaders for both firmware types, the initramfs generator, and the systemd init/service manager |
+| Kernel & firmware | 34 | 1.37 GiB | the Linux kernel, CPU microcode, and device firmware blobs |
+| Boot & init | 14 | 126.0 MiB | boot loaders for both firmware types, the initramfs generator, and the systemd init/service manager |
 | Core system | 13 | 71.5 MiB | the base userland -- C library, coreutils, package manager, PAM/polkit, and privilege escalation |
-| Shell & CLI tools | 31 | 76.1 MiB | interactive shells, terminal editors, pagers, multiplexers, and everyday command-line utilities |
+| Shell & CLI tools | 32 | 77.3 MiB | interactive shells, terminal editors, pagers, multiplexers, and everyday command-line utilities |
 | Desktop app | 7 | 454.2 MiB | graphical end-user applications shipped on the medium |
 | GUI toolkit/framework | 29 | 561.1 MiB | the widget toolkits and UI frameworks graphical apps are built on |
-| Graphics & display | 112 | 876.6 MiB | the X11 display server, Mesa/Vulkan drivers, and display configuration |
-| Audio | 44 | 47.9 MiB | the audio server and mixer/control tooling |
-| Networking | 37 | 131.7 MiB | connection management, wireless, VPN, SSH, DNS, and network diagnostics |
-| Storage & filesystems | 46 | 84.7 MiB | partitioning, RAID/LVM, encryption setup, and filesystem/imaging tooling |
-| Security & crypto | 18 | 76.0 MiB | the host firewall, full-disk encryption, TPM/FIDO/smartcard, and OpenPGP |
-| Developer tools | 111 | 1.21 GiB | compilers, build tooling, version control, and developer editors |
-| Language runtime | 29 | 949.6 MiB | language interpreters and runtimes available out of the box |
+| Graphics & display | 112 | 922.6 MiB | the X11 display server, Mesa/Vulkan drivers, and display configuration |
+| Audio | 44 | 51.2 MiB | the audio server and mixer/control tooling |
+| Networking | 37 | 131.8 MiB | connection management, wireless, VPN, SSH, DNS, and network diagnostics |
+| Storage & filesystems | 46 | 85.3 MiB | partitioning, RAID/LVM, encryption setup, and filesystem/imaging tooling |
+| Security & crypto | 18 | 76.5 MiB | the host firewall, full-disk encryption, TPM/FIDO/smartcard, and OpenPGP |
+| Developer tools | 110 | 1.04 GiB | compilers, build tooling, version control, and developer editors |
+| Language runtime | 28 | 951.1 MiB | language interpreters and runtimes available out of the box |
 | Multimedia codec/player | 73 | 239.0 MiB | media players and the codec/plugin stack that decodes and encodes them |
 | Fonts & icons | 21 | 162.2 MiB | console and desktop fonts, cursors, and icon themes |
 | Printing & scanning | 4 | 16.2 MiB | the printing subsystem and its device support |
 | Bluetooth & devices | 12 | 16.8 MiB | Bluetooth, USB, accessibility, and other peripheral device support |
 | Virtualization guest | 6 | 9.2 MiB | guest integration agents for the major hypervisors |
-| Shared library | 365 | 6.51 GiB | shared libraries other components link against |
-| System | 237 | 9.77 GiB | supporting system components that back the above |
+| Shared library | 365 | 7.00 GiB | shared libraries other components link against |
+| System | 237 | 9.79 GiB | supporting system components that back the above |
 
 ---
 
