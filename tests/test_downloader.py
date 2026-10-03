@@ -16,6 +16,8 @@ Two things ARE pure and high-value:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import downloader
@@ -208,6 +210,62 @@ def test_download_conf_honours_parallel_downloads_override():
     assert "ParallelDownloads = 5" in downloader.pacman_cfg.download_conf()
 
 
+# --- db-sync safety: no stale .db.part resumed onto a mutable, changed database -------------
+#
+# The `pacman -Sy` sync fetches MUTABLE databases; it must use a NON-resumable XferCommand
+# (db_sync=True -> no `-C -`) and start from a clean slate. A SIGKILL'd prior sync can leave
+# a `<repo>.db.part` on disk, and resuming that stale prefix onto a changed db corrupts it.
+# These pin the two halves of the fix: the conf writer passes db_sync through, and the sweep
+# removes leftover db partials without touching the (safely resumable) package partials.
+
+def _xfer_line(conf_text):
+    # The active XferCommand line's value (the comment lines also mention "-C -", so match the
+    # directive, not the whole file -- mirrors test_configuration_pacman._xfer).
+    return next(l.split("=", 1)[1].strip() for l in conf_text.splitlines()
+                if l.split("#", 1)[0].strip().startswith("XferCommand"))
+
+
+def test_write_download_conf_threads_db_sync_flag(tmp_path):
+    # _write_download_conf(..., db_sync=True) must emit the db-sync XferCommand (no -C -), and
+    # the default must emit the resumable package one (-C -). This is what makes the -Sy call
+    # use the safe variant while -Sw keeps resuming.
+    pkg = downloader._write_download_conf(tmp_path / "pkg.conf")
+    db = downloader._write_download_conf(tmp_path / "db.conf", db_sync=True)
+    assert "-C -" in _xfer_line(pkg.read_text())
+    assert "-C -" not in _xfer_line(db.read_text())
+
+
+def test_clear_stale_db_parts_removes_db_partials(tmp_path):
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    (sync / "core.db.part").write_text("stale")
+    (sync / "extra.db.part").write_text("stale")
+    (sync / "extra.files.part").write_text("stale")
+    (sync / "core.db").write_text("a real, complete db")   # must be kept
+    downloader._clear_stale_db_parts(tmp_path)
+    remaining = sorted(p.name for p in sync.iterdir())
+    assert remaining == ["core.db"], f"stale .part files not swept: {remaining}"
+
+
+def test_clear_stale_db_parts_leaves_resumable_package_partials(tmp_path):
+    # Package partials live in the CACHEDIR (not the sync dir) and ARE safely resumable
+    # (immutable per version), so the sweep must never touch them -- only the mutable db
+    # partials under sync/ are swept.
+    sync = tmp_path / "sync"
+    sync.mkdir()
+    (sync / "core.db.part").write_text("stale")
+    pkg_part = tmp_path / "firefox-1.0-1-x86_64.pkg.tar.zst.part"
+    pkg_part.write_text("half a package, resume me")
+    downloader._clear_stale_db_parts(tmp_path)
+    assert not (sync / "core.db.part").exists(), "stale db .part must be swept"
+    assert pkg_part.exists(), "resumable package .part must be preserved"
+
+
+def test_clear_stale_db_parts_tolerates_missing_sync_dir(tmp_path):
+    # A first-ever build has no sync/ dir yet; the sweep must be a no-op, not a crash.
+    downloader._clear_stale_db_parts(tmp_path / "pkgs" / "db")  # does not exist
+
+
 def test_no_duplicates_within_azzio_additions_block():
     # packages.x86_64 has two blocks: STOCK ARCH (the upstream releng baseline) and
     # AZZIO ADDITIONS (the block the maintainer actually edits). A package listed
@@ -223,3 +281,51 @@ def test_no_duplicates_within_azzio_additions_block():
     additions = _tokenize("\n".join(lines[close + 1:]))
     dupes = {t for t in additions if additions.count(t) > 1}
     assert not dupes, f"duplicate packages within the Azzio-additions block: {sorted(dupes)}"
+
+
+# --- _sync_and_download wiring: the -Sy sync uses the SAFE (non-resumable) conf -------------
+#
+# This is the regression's wiring, not just the string generators: it pins that the actual
+# `pacman -Sy` invocation is handed the db-sync conf (no -C -) while the `pacman -Sw`
+# invocations keep the resumable package conf, and that the stale-db-part sweep runs before
+# the sync. We fake logstream.run_teed (capture the argv) and the manifest, so no real pacman
+# runs. Everything after the download (reconcile/stage) is not reached: the -Sw attempts all
+# "succeed" (rc 0) so _download_with_retry returns and the function completes its download half.
+
+def test_sync_and_download_uses_safe_conf_for_db_sync(monkeypatch, tmp_path):
+    workdir = tmp_path / "work"
+    pkg_db = tmp_path / "db"
+    pkg_repo = tmp_path / "repo"
+    (pkg_db / "sync").mkdir(parents=True)
+    pkg_repo.mkdir(parents=True)
+    workdir.mkdir()
+    # a leftover db partial from a "killed prior sync" -- the sweep must remove it before -Sy.
+    (pkg_db / "sync" / "core.db.part").write_text("stale")
+    dlconf = workdir / ".cache-pkgs-pacman.conf"
+
+    # Keep the package list tiny and deterministic (no real manifest / makepkg).
+    monkeypatch.setattr(downloader, "downloadable_packages", lambda full_compile=False: ["pkga"])
+
+    captured = []
+
+    def fake_run_teed(cmd, **kw):
+        captured.append(list(cmd))
+        return 0  # every pacman call "succeeds" -> no retry loop, function returns
+
+    monkeypatch.setattr(downloader.logstream, "run_teed", fake_run_teed)
+
+    downloader._sync_and_download([], dlconf, tmp_path / "gpg", pkg_db, pkg_repo,
+                                  progress=lambda _p: None)
+
+    # The sweep ran: the stale db partial is gone before the sync.
+    assert not (pkg_db / "sync" / "core.db.part").exists()
+
+    sy = next(c for c in captured if "-Sy" in c)
+    sw = next(c for c in captured if "-Sw" in c)
+    sy_conf = Path(sy[sy.index("--config") + 1])
+    sw_conf = Path(sw[sw.index("--config") + 1])
+    # -Sy must use the dedicated db-sync conf (a DIFFERENT file from the package conf), and that
+    # conf must carry the NON-resumable XferCommand; -Sw keeps the resumable package conf.
+    assert sy_conf != sw_conf, "db sync must use its own conf, not the package conf"
+    assert "-C -" not in _xfer_line(sy_conf.read_text()), "db-sync conf must drop -C -"
+    assert "-C -" in _xfer_line(sw_conf.read_text()), "package conf must keep -C -"

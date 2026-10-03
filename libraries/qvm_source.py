@@ -63,9 +63,43 @@ QVM_REPO_REF = os.environ.get("QVM_REPO_REF", "")  # "" => clone the remote's de
 
 # Where the checkout lands: under azzio's persistent cache/ (git-ignored, bind-mounted in
 # Docker, reused across builds) -- the SAME store the package cache uses, so a warm rebuild
-# reuses it and a fully-offline rebuild (BUILD_OFFLINE) never needs the network. Overridable
-# with AZZIO_QVM_DIR to point at an existing checkout (air-gapped / CI), which skips git.
+# reuses it and a fully-offline rebuild (AZZIO_OFFLINE, with cache/qvm already warmed by a
+# prior online run) never needs the network. Overridable with AZZIO_QVM_DIR to point at an
+# existing checkout (air-gapped / CI), which skips git entirely.
 QVM_CHECKOUT = paths.CACHEDIR / "qvm"
+
+# HARD timeout (seconds) on EVERY git network call (clone / fetch). THE reason this exists:
+# the clone runs mid-build (compiler step 8, _emit_desktop) UNDER the pinned progress bar and
+# BEFORE the build has resolved mirrors / the offline switch (step 11). A bare
+# subprocess.run() with no timeout would block FOREVER on a stalled connect, a half-open TLS
+# handshake, or a throttling GitHub -- and because the bar is pinned with no heartbeat for
+# this step, that hang is INVISIBLE: it looks exactly like "the build is idle / frozen".
+# Bounding every git call turns a network stall into a FAST, explicit QvmSourceError (caught
+# by compiler.main) instead of a silent hang. Overridable for a slow link / a huge mirror;
+# the default is generous for a shallow single-branch clone of a small pure-Python repo.
+# git also gets GIT_HTTP_LOW_SPEED_* (see _git_env) so a mid-transfer CRAWL aborts too -- the
+# subprocess timeout covers a dead-stop connect, the low-speed limit covers a trickle.
+_CLONE_TIMEOUT = int(os.environ.get("AZZIO_QVM_CLONE_TIMEOUT", "180"))
+
+
+def _is_offline(offline: "bool | None" = None) -> bool:
+    """Whether this build is fully offline, so a qvm clone would be a pointless doomed fetch.
+
+    The AUTHORITATIVE signal is the `offline` argument compiler.py threads in -- the SAME
+    boolean the rest of the build uses (offline = cache_is_complete(), passed to build_cache).
+    emit_plan()/ensure_checkout() forward it here so the qvm fetch fails fast on an offline
+    rebuild with a cold cache/qvm, exactly like the package cache does, instead of burning the
+    whole _CLONE_TIMEOUT on a connect that cannot succeed.
+
+    When it is None (the no-arg emit_plan() contract the old inline packaging kept, and the
+    unit tests), fall back to the AZZIO_OFFLINE env var so an operator can still force the
+    fail-fast by hand. NB: azzio sets AZZIO_OFFLINE only for makepkg's CHILD process (a later
+    build step), NOT in this process before the desktop emit -- so in the real build the
+    `offline` ARGUMENT is what makes this reachable; the env var is just a manual override.
+    Truthiness mirrors the C side's AZZIO_FORCE_LIVE (1/true/yes/on)."""
+    if offline is not None:
+        return bool(offline)
+    return os.environ.get("AZZIO_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class QvmSourceError(RuntimeError):
@@ -80,14 +114,18 @@ def _checkout_libraries(root) -> "paths.Path":
     return root / "libraries"
 
 
-def ensure_checkout():
+def ensure_checkout(offline: "bool | None" = None):
     """Return the libraries/ dir of a usable qvm checkout, obtaining it if needed.
+
+    offline is the build-wide offline signal compiler.py threads in (offline =
+    cache_is_complete()); None falls back to the AZZIO_OFFLINE env var (see _is_offline).
 
     Resolution order (cache-first, so a warm/offline rebuild contacts no server):
       1. AZZIO_QVM_DIR set -> use that checkout verbatim (air-gapped / CI). Git is never
          run; the dir MUST already contain libraries/command_line_interface.py.
       2. cache/qvm already a usable checkout -> REUSE it untouched (no fetch).
-      3. otherwise -> `git clone` QVM_REPO_URL (at QVM_REPO_REF if pinned) into cache/qvm.
+      3. offline + no warm checkout + no override -> fail fast (a clone can only fail).
+      4. otherwise -> `git clone` QVM_REPO_URL (at QVM_REPO_REF if pinned) into cache/qvm.
 
     Raises QvmSourceError if, after all that, there is no usable checkout -- azzio needs
     the `qvm` source to bake into the ISO, so a miss is fatal (not a warning)."""
@@ -107,6 +145,17 @@ def ensure_checkout():
         # Warm cache: reuse the existing checkout untouched (offline-safe, resumable).
         return libs
 
+    # No warm checkout and no override. If the build is OFFLINE, a clone can only reach the
+    # network and fail -- so fail NOW with an actionable message instead of stalling for the
+    # whole clone timeout on a connect that cannot succeed. (A warm cache/qvm from a prior
+    # online run is the supported offline path; so is AZZIO_QVM_DIR.)
+    if _is_offline(offline):
+        raise QvmSourceError(
+            f"offline build but no qvm checkout at {QVM_CHECKOUT} and no AZZIO_QVM_DIR "
+            f"override -- qvm must be fetched online at least once. Run one online build to "
+            f"warm cache/qvm, or set AZZIO_QVM_DIR to an existing checkout."
+        )
+
     _clone(QVM_CHECKOUT)
     libs = _checkout_libraries(QVM_CHECKOUT)
     if not (libs / "command_line_interface.py").is_file():
@@ -117,11 +166,46 @@ def ensure_checkout():
     return libs
 
 
+def _git_env() -> dict:
+    """The environment for the git network calls: inherit the caller's, then add
+    GIT_HTTP_LOW_SPEED_LIMIT/-TIME so git's OWN http transport aborts a mid-transfer CRAWL
+    (bytes still trickling, so the process is not 'stuck' and the subprocess timeout would
+    not fire, yet the transfer makes no real progress). Together with the subprocess
+    `timeout=` -- which catches a DEAD-STOP connect/handshake -- this covers both ways a
+    clone can hang the build. 1024 B/s over 30 s mirrors the curl --speed-limit/--speed-time
+    the package downloader uses (pacman._DOWNLOAD_XFERCOMMAND), so both fetch paths give up
+    on a trickle at the same threshold. GIT_TERMINAL_PROMPT=0 makes a private/auth-required
+    remote fail immediately instead of blocking on an (unanswerable, no-tty) credential
+    prompt -- another silent-hang trap under the PTY re-exec."""
+    env = dict(os.environ)
+    env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+    env.setdefault("GIT_HTTP_LOW_SPEED_TIME", "30")
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _run_git(cmd: list, *, what: str) -> subprocess.CompletedProcess:
+    """Run one git command with the hardened env and the HARD _CLONE_TIMEOUT. A timeout is
+    converted into a QvmSourceError (NOT a silent hang): this is the single most important
+    behaviour of this module -- see _CLONE_TIMEOUT. `what` names the step for the message."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=_CLONE_TIMEOUT, env=_git_env())
+    except subprocess.TimeoutExpired:
+        raise QvmSourceError(
+            f"{what} timed out after {_CLONE_TIMEOUT}s talking to {QVM_REPO_URL} -- the "
+            f"network (or GitHub) is unreachable or stalled. Fix connectivity and retry, run "
+            f"one online build to warm cache/qvm, or set AZZIO_QVM_DIR to an existing "
+            f"checkout. (Raise the limit with AZZIO_QVM_CLONE_TIMEOUT if the link is just slow.)"
+        ) from None
+
+
 def _clone(dest) -> None:
     """Shallow-clone QVM_REPO_URL into dest (at QVM_REPO_REF if set). Any stale/partial
     dir from a killed prior clone is removed first so the clone starts clean. git is in the
     build image (Dockerfile) and on a native Arch build host. Raises QvmSourceError with the
-    git output on failure (fatal -- see ensure_checkout)."""
+    git output on failure, OR a clear timeout error if the clone stalls (fatal -- see
+    ensure_checkout / _CLONE_TIMEOUT)."""
     if not _have_git():
         raise QvmSourceError(
             "git is required to obtain qvm from GitHub but was not found on PATH "
@@ -137,8 +221,9 @@ def _clone(dest) -> None:
         cmd += ["--branch", QVM_REPO_REF]
     cmd += [QVM_REPO_URL, str(dest)]
     print(f"[*] Obtaining qvm from {QVM_REPO_URL}"
-          f"{f' @ {QVM_REPO_REF}' if QVM_REPO_REF else ''} -> {dest}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+          f"{f' @ {QVM_REPO_REF}' if QVM_REPO_REF else ''} -> {dest} "
+          f"(timeout {_CLONE_TIMEOUT}s)...", flush=True)
+    proc = _run_git(cmd, what="git clone of qvm")
     if proc.returncode != 0:
         # --branch rejects a raw commit SHA; retry as a full-ref fetch + checkout so a
         # pinned COMMIT (not just a tag/branch) still works.
@@ -147,23 +232,26 @@ def _clone(dest) -> None:
         raise QvmSourceError(
             f"git clone of {QVM_REPO_URL} failed (exit {proc.returncode}):\n{proc.stderr.strip()}"
         )
+    print("[✓] qvm source obtained.", flush=True)
 
 
 def _try_clone_commit(dest) -> bool:
     """Fallback for a pinned raw COMMIT (which `git clone --branch` rejects): init, fetch
     just that commit, and check it out. Returns True on success, False so the caller raises
-    the original clone error if this also fails."""
+    the original clone error if this also fails. Every git step is bounded by _CLONE_TIMEOUT
+    (a stalled fetch raises QvmSourceError rather than hanging the build)."""
     if dest.exists():
         subprocess.run(["rm", "-rf", str(dest)], check=False)
     dest.mkdir(parents=True, exist_ok=True)
     steps = [
-        ["git", "-C", str(dest), "init", "-q"],
-        ["git", "-C", str(dest), "remote", "add", "origin", QVM_REPO_URL],
-        ["git", "-C", str(dest), "fetch", "-q", "--depth", "1", "origin", QVM_REPO_REF],
-        ["git", "-C", str(dest), "checkout", "-q", "FETCH_HEAD"],
+        (["git", "-C", str(dest), "init", "-q"], "git init"),
+        (["git", "-C", str(dest), "remote", "add", "origin", QVM_REPO_URL], "git remote add"),
+        (["git", "-C", str(dest), "fetch", "-q", "--depth", "1", "origin", QVM_REPO_REF],
+         "git fetch of qvm commit"),
+        (["git", "-C", str(dest), "checkout", "-q", "FETCH_HEAD"], "git checkout"),
     ]
-    for step in steps:
-        if subprocess.run(step, capture_output=True, text=True).returncode != 0:
+    for cmd, what in steps:
+        if _run_git(cmd, what=what).returncode != 0:
             return False
     return True
 
@@ -274,14 +362,19 @@ _EXEC = 0o755
 _CONF = 0o644
 
 
-def emit_plan() -> list[dict]:
+def emit_plan(offline: "bool | None" = None) -> list[dict]:
     """Return the emit plan (builder/dest/mode) for compiler.py to write into the airootfs:
     one entry per qvm module file (into LIB_DIR), the /usr/bin/qvm launcher, and the qvm
     bash-completion. Obtains the qvm checkout first (ensure_checkout(), cache-first), so the
     builders read from a guaranteed-present source tree. Built fresh each call (compiler.py
     may call this more than once per build), so a mutated returned entry can never corrupt
-    module state."""
-    libs = ensure_checkout()
+    module state.
+
+    offline is forwarded to ensure_checkout() so an offline rebuild with a cold cache/qvm
+    fails fast instead of attempting a doomed clone (None -> AZZIO_OFFLINE env fallback). The
+    no-arg call is still valid -- the old inline packaging.emit_plan() took no args and the
+    unit tests call it bare."""
+    libs = ensure_checkout(offline)
     plan = [
         {"builder": _FileBuilder(libs / name), "dest": f"{LIB_DIR}/{name}", "mode": _CONF}
         for name in _shipped_module_names(libs)

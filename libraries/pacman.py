@@ -380,30 +380,65 @@ def _net_repos(multilib: bool) -> str:
 #                                        other, incl. mid-stream resets / connect refusals)
 #                                        against a fresh connection, up to 5 times, before giving up
 #   -C -                                 RESUME a partial file (pairs with pacman's resumable
-#                                        --cachedir: a retried package continues, not restarts)
+#                                        --cachedir: a retried package continues, not restarts).
+#                                        ** Used ONLY for the PACKAGE fetch (-Sw), never for the
+#                                        db sync (-Sy) -- see below. **
 #   -f                                   fail on HTTP >=400 (so a 404/503 is an error, not a
 #                                        saved error page) -- matches Arch's stock agent
 #   -L                                   follow redirects
-# pacman substitutes %u -> URL and %o -> the output cache path.
+# pacman substitutes %u -> URL and %o -> the output cache path (actually "<file>.part" -- see
+# `man 5 pacman.conf`: pacman hands the XferCommand a .part file and renames it on exit 0).
+#
+# WHY TWO VARIANTS (-C - is UNSAFE for the db sync). pacman uses the XferCommand for EVERY
+# remote file -- both the immutable package tarballs AND the mutable sync databases
+# (core.db / extra.db / multilib.db), the latter fetched by `pacman -Sy`. `-C -` means
+# "resume from the current size of the .part file":
+#   * PACKAGE files are immutable per version (content-addressed by name-ver-rel), so a
+#     leftover <pkg>.part from a killed run is a correct prefix of the same bytes -- resuming
+#     it is exactly the resumable-cache win we want. SAFE.
+#   * DB files CHANGE server-side between runs. A leftover <repo>.db.part from a killed -Sy
+#     is a prefix of the OLD db; `-C -` sends `Range: bytes=<old size>-` and archive.archlinux
+#     .org (a static server that HONOURS ranges) appends the tail of the NEW, different db
+#     onto the stale prefix -> a corrupt .db that pacman renames into place and later fails to
+#     parse ("database ... is not valid") far from the real cause. UNSAFE.
+# So the db-sync conf drops `-C -` (always fetch the small db whole -- correctness over a
+# negligible resume saving) and also drops `-f` (a legitimately-absent optional db path, e.g.
+# a repo with no files-db, should not hard-fail and then burn the whole per-file retry budget;
+# pacman tolerates a missing db itself). The downloader additionally sweeps stale *.db.part
+# before the sync as belt-and-suspenders (see downloader._clear_stale_db_parts).
 #
 # NOTE: setting XferCommand DISABLES pacman's internal ParallelDownloads (parallelism only
-# exists in the built-in downloader), so every package is fetched SERIALLY by curl. That is
+# exists in the built-in downloader), so every file is fetched SERIALLY by curl. That is
 # fine and in fact GENTLER on the throttling archive -- it is exactly what the download
 # retry ladder's final rung was already forcing (see downloader._PARALLEL_LADDER). The outer
 # ladder now serves as a coarse whole-transaction retry-with-backoff around curl's own
 # per-file retries; the ParallelDownloads line is kept (harmless, documents intent) but is
 # inert while XferCommand is set.
-_DOWNLOAD_XFERCOMMAND = (
-    "/usr/bin/curl -4 -L -C - -f "
+#
+# Shared curl flags for BOTH variants (stall/retry recovery), assembled once so the package
+# and db-sync commands cannot drift apart on the parts that must stay identical:
+_CURL_COMMON = (
+    "/usr/bin/curl -4 -L "
     "--connect-timeout 30 "
     "--retry 5 --retry-delay 5 --retry-all-errors "
-    "--speed-time 30 --speed-limit 1024 "
-    "-o %o %u"
+    "--speed-time 30 --speed-limit 1024"
 )
+# PACKAGE download (-Sw): resumable (-C -) + hard-fail on >=400 (-f). SAFE for immutable pkgs.
+_DOWNLOAD_XFERCOMMAND = f"{_CURL_COMMON} -C - -f -o %o %u"
+# DB sync (-Sy): NO -C - (mutable db must be fetched whole) and NO -f (tolerate an absent
+# optional db). Otherwise identical recovery flags.
+_DB_SYNC_XFERCOMMAND = f"{_CURL_COMMON} -o %o %u"
 
 
-def download_conf(parallel_downloads: int = 5) -> str:
+def download_conf(parallel_downloads: int = 5, *, db_sync: bool = False) -> str:
     """Host-independent configuration for the package-cache download step (cache-pkgs).
+
+    db_sync selects which curl XferCommand is emitted:
+      * False (default) -> _DOWNLOAD_XFERCOMMAND: resumable (-C -), for the `pacman -Sw`
+        PACKAGE fetch (immutable files, so resuming a .part is safe and desirable).
+      * True            -> _DB_SYNC_XFERCOMMAND: NON-resumable, for the `pacman -Sy` DB sync.
+        The sync databases change server-side, and `-C -` on a stale <repo>.db.part corrupts
+        them (see _DB_SYNC_XFERCOMMAND). The db is small, so fetching it whole costs nothing.
 
     parallel_downloads controls the ParallelDownloads line. It defaults to 5, but the
     download retry (downloader._sync_and_download) regenerates this config with a LOWER
@@ -421,6 +456,7 @@ def download_conf(parallel_downloads: int = 5) -> str:
     DownloadUser=alpm (pacman runs as root into root-owned scratch here).
     """
     mirrors = _SNAPSHOT_MIRRORS
+    xfercommand = _DB_SYNC_XFERCOMMAND if db_sync else _DOWNLOAD_XFERCOMMAND
     return f"""\
 #
 # Self-contained Arch Linux configuration used ONLY by the package-cache step to
@@ -440,10 +476,12 @@ Architecture      = x86_64
 HoldPkg           = pacman glibc
 CheckSpace
 ParallelDownloads = {parallel_downloads}
-# Fetch every package through curl with stall/retry recovery so one slow file from the
-# throttling archive host cannot hang or abort the whole download (see
-# _DOWNLOAD_XFERCOMMAND). Setting this disables pacman's internal parallel downloader.
-XferCommand       = {_DOWNLOAD_XFERCOMMAND}
+# Fetch every file through curl with stall/retry recovery so one slow file from the
+# throttling archive host cannot hang or abort the whole transaction (see
+# _DOWNLOAD_XFERCOMMAND / _DB_SYNC_XFERCOMMAND). Setting this disables pacman's internal
+# parallel downloader. The db-sync variant (db_sync=True) drops `-C -` so a mutable .db is
+# never resumed from a stale partial.
+XferCommand       = {xfercommand}
 SigLevel          = Never
 LocalFileSigLevel = Never
 # Intentionally NO 'DownloadUser = alpm': pacman runs as root here and writes into

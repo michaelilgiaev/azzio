@@ -611,7 +611,7 @@ def run(bar: ProgressBar, offline: bool, reclaim_after_mkarchiso,
     # default (autologin root) to autologin `main`, whose .bash_profile execs startx
     # into an OpenBox X11 session. The Calamares configuration tree lands under /etc/calamares.
     bar.step("Overlay OpenBox desktop and Calamares configuration")
-    _emit_desktop(airootfs, home)
+    _emit_desktop(airootfs, home, offline)
     _emit_homedir(airootfs, home)
     _emit_apps(airootfs, home, ea)
     _emit_calamares(airootfs)
@@ -834,13 +834,17 @@ def _apply_variant(W: Path, airootfs: Path, variant: str,
         hook.unlink(missing_ok=True)
 
 
-def _emit_desktop(airootfs: Path, home: Path) -> None:
+def _emit_desktop(airootfs: Path, home: Path, offline: bool = False) -> None:
     """Emit the OpenBox live-session files. Each PLAN entry has an absolute dest
     (either under /home/main for the live user -- e.g. ~/.config/openbox/* -- or an
     absolute system path). User files are ALSO copied into /etc/skel so a
     Calamares-created user on the installed system inherits the same desktop
     (Manjaro-style). The /home/main tree is chowned 1000:998 by step 6 / the post-emit
-    chown below."""
+    chown below.
+
+    offline is the build-wide offline signal (offline = cache_is_complete()); it is forwarded
+    to qvm_source.emit_plan() so an offline rebuild with a cold cache/qvm fails fast with a
+    clear message instead of attempting a doomed clone (see qvm_source.ensure_checkout)."""
     skel = airootfs / "etc/skel"
     # OpenBox live-session files + the LibreWolf browser-policy override. Both use the
     # same builder/dest/mode/owner plan shape and the same home-file + /etc/skel mirror
@@ -1003,7 +1007,7 @@ def _emit_desktop(airootfs: Path, home: Path) -> None:
     # does NOT cd (unlike passwords): `qvm` derives the VM identity from the caller's CWD,
     # which the launcher must preserve. The OFFLINE Calamares install rsyncs it onto the
     # installed system, so `qvm` works there too. See libraries/qvm_source.py.
-    for entry in qvm_source.emit_plan():
+    for entry in qvm_source.emit_plan(offline):
         emit.write_text(
             airootfs / entry["dest"].lstrip("/"),
             entry["builder"](),

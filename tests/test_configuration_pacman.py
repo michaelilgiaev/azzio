@@ -81,6 +81,69 @@ def test_download_conf_stall_recovery_matches_makepkg_speed_flags():
     assert "--speed-limit 1024" in flags and "--speed-limit 1024" in xfer
 
 
+# --- db_sync XferCommand: NO -C - on the mutable sync databases (regression) ------------
+#
+# pacman uses the XferCommand for EVERY remote file -- including the MUTABLE sync databases
+# (core.db/extra.db/multilib.db) fetched by `pacman -Sy`. pacman hands the command a
+# "<file>.part" (man 5 pacman.conf) and renames it on success. `-C -` means "resume from the
+# .part's current size": correct for IMMUTABLE package tarballs, but CORRUPTING for a db --
+# a stale <repo>.db.part from a killed sync gets the tail of the NEW, changed db appended onto
+# the old prefix, producing a db that pacman later fails to parse ("not valid") far from the
+# cause. So the db-sync conf (db_sync=True) must drop -C - (and -f); the package conf keeps it.
+
+def _xfer(conf):
+    return next(l.split("=", 1)[1].strip() for l in conf.splitlines()
+                if l.split("#", 1)[0].strip().startswith("XferCommand"))
+
+
+def test_db_sync_conf_drops_resume_flag():
+    # THE regression guard: the db-sync XferCommand must NOT carry `-C -` (resume), because the
+    # sync databases change server-side and resuming a stale .part corrupts them.
+    xfer = _xfer(pacman.download_conf(db_sync=True))
+    assert "-C -" not in xfer, "db-sync must NOT resume a mutable .db (corruption risk)"
+
+
+def test_db_sync_conf_drops_hard_fail_flag():
+    # `-f` (fail on HTTP >=400) is dropped for the db sync: a legitimately-absent optional db
+    # path should not hard-fail and then burn the whole per-file retry budget -- pacman
+    # tolerates a missing db itself. (It is KEPT for packages, where a 404 is a real error.)
+    xfer = _xfer(pacman.download_conf(db_sync=True))
+    assert " -f " not in f" {xfer} "
+
+
+def test_package_conf_keeps_resume_and_hard_fail():
+    # The DEFAULT (package) conf is unchanged: immutable package tarballs are safely resumable,
+    # so -C - stays, and a package 404 is a real error, so -f stays.
+    xfer = _xfer(pacman.download_conf())
+    assert "-C -" in xfer
+    assert " -f " in f" {xfer} "
+
+
+def test_db_sync_and_package_confs_share_the_same_stall_recovery():
+    # Dropping -C -/-f must NOT weaken the stall/throttle recovery: both variants fetch from the
+    # same flaky archive host, so every OTHER curl flag (IPv4, connect-timeout, retry ladder,
+    # low-speed abort) must be identical. A drift here would make the db sync hang where the
+    # package download recovers (or vice versa).
+    pkg = _xfer(pacman.download_conf())
+    db = _xfer(pacman.download_conf(db_sync=True))
+    for flag in ("-4", "-L", "--connect-timeout 30", "--retry 5", "--retry-delay 5",
+                 "--retry-all-errors", "--speed-time 30", "--speed-limit 1024"):
+        assert flag in pkg, f"package conf lost {flag}"
+        assert flag in db, f"db-sync conf lost {flag}"
+    # Both still thread pacman's substitution tokens through to curl.
+    assert "%u" in db and "%o" in db
+
+
+def test_db_sync_conf_is_otherwise_a_normal_download_conf():
+    # db_sync only toggles the XferCommand; everything else that makes the conf host-independent
+    # and correct must be identical, so an offline/pinned build behaves the same for the sync.
+    db = pacman.download_conf(db_sync=True)
+    assert "Include = /etc/pacman.d/mirrorlist" not in db
+    assert "SigLevel          = Never" in db
+    assert "archive.archlinux.org" in db and pacman.ARCH_SNAPSHOT in db
+    assert "[core]" in db and "[extra]" in db and "[multilib]" in db
+
+
 # --- build_profile_conf: mkarchiso's internal pacstrap ---------------------
 
 def test_build_profile_conf_injects_cachedir():

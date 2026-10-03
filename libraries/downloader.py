@@ -163,9 +163,29 @@ def _split_pkg(basename: str) -> tuple[str, str, str]:
     return key, name, f"{ver}-{rel}"
 
 
-def _write_download_conf(dest: Path, parallel_downloads: int = 5) -> Path:
-    dest.write_text(pacman_cfg.download_conf(parallel_downloads) + "\n", encoding="utf-8")
+def _write_download_conf(dest: Path, parallel_downloads: int = 5, *, db_sync: bool = False) -> Path:
+    dest.write_text(
+        pacman_cfg.download_conf(parallel_downloads, db_sync=db_sync) + "\n", encoding="utf-8"
+    )
     return dest
+
+
+def _clear_stale_db_parts(pkg_db: Path) -> None:
+    """Remove any leftover `*.db.part` / `*.files.part` partials under the sync dir before a
+    `pacman -Sy`.
+
+    pacman hands curl `<file>.part` and renames it on success, so a SIGKILL'd prior sync can
+    leave `<repo>.db.part` on disk. The sync databases change server-side; even though the
+    db-sync XferCommand no longer passes `-C -` (so curl would truncate-and-refetch, not
+    append), sweeping the stale partials is a cheap, explicit guarantee that a mutable db is
+    always fetched clean -- no resume, no half-written leftover mistaken for a real db. The
+    packages' own `*.pkg.tar.zst.part` under the cachedir are deliberately NOT touched: those
+    ARE safely resumable (immutable per version -- see pacman._DOWNLOAD_XFERCOMMAND)."""
+    sync = pkg_db / "sync"
+    if not sync.is_dir():
+        return
+    for part in list(sync.glob("*.part")):
+        part.unlink(missing_ok=True)
 
 
 def build_cache(workdir: Path, cachedir: Path, offline: bool, progress: ProgressCb,
@@ -242,11 +262,18 @@ def _sync_and_download(sudo, dlconf, gpgdir, pkg_db, pkg_repo, progress, phase=l
                        full_compile: bool = False) -> None:
     phase("syncing package databases")
     print("[*] Syncing package databases...")
+    # The db sync (-Sy) fetches MUTABLE databases, so it must NOT use the resumable (-C -)
+    # curl XferCommand the package download uses: a stale <repo>.db.part would be resumed onto
+    # a changed db and corrupt it (see pacman._DB_SYNC_XFERCOMMAND). Use a dedicated db-sync
+    # conf (db_sync=True -> no -C -, no -f) and sweep any leftover *.db.part from a killed
+    # prior sync first, so the db is always fetched clean.
+    _clear_stale_db_parts(pkg_db)
+    dbsyncconf = _write_download_conf(dlconf.with_name(".cache-pkgs-dbsync.conf"), db_sync=True)
     # Teed (Popen+pipe pumped through the _Tee) so pacman's DB-sync lines land in
     # compile-full.log in real time; a bare subprocess.run would inherit the PTY and never
     # reach the log.
     rc = logstream.run_teed(
-        sudo + ["pacman", "-Sy", "--config", str(dlconf), "--gpgdir", str(gpgdir),
+        sudo + ["pacman", "-Sy", "--config", str(dbsyncconf), "--gpgdir", str(gpgdir),
                 "--dbpath", str(pkg_db), "--cachedir", str(pkg_repo), "--noconfirm",
                 "--disable-download-timeout"],
     )
