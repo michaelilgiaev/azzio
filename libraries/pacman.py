@@ -419,6 +419,12 @@ def _net_repos(multilib: bool) -> str:
 # and db-sync commands cannot drift apart on the parts that must stay identical:
 _CURL_COMMON = (
     "/usr/bin/curl -4 -L "
+    # -sS: silence curl's per-file progress meter (one noisy block PER package, with no
+    # running N-of-total count, floods the terminal and the teed log because each file is a
+    # SEPARATE curl invocation under XferCommand) while -S still surfaces real transfer
+    # errors. pacman then shows its own readable one-line-per-package "downloading foo..."
+    # instead. Without this the whole cache-download phase is unreadable (see download_conf).
+    "-sS "
     "--connect-timeout 30 "
     "--retry 5 --retry-delay 5 --retry-all-errors "
     "--speed-time 30 --speed-limit 1024"

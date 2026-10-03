@@ -126,12 +126,22 @@ def test_db_sync_and_package_confs_share_the_same_stall_recovery():
     # package download recovers (or vice versa).
     pkg = _xfer(pacman.download_conf())
     db = _xfer(pacman.download_conf(db_sync=True))
-    for flag in ("-4", "-L", "--connect-timeout 30", "--retry 5", "--retry-delay 5",
+    for flag in ("-4", "-L", "-sS", "--connect-timeout 30", "--retry 5", "--retry-delay 5",
                  "--retry-all-errors", "--speed-time 30", "--speed-limit 1024"):
         assert flag in pkg, f"package conf lost {flag}"
         assert flag in db, f"db-sync conf lost {flag}"
     # Both still thread pacman's substitution tokens through to curl.
     assert "%u" in db and "%o" in db
+
+
+def test_both_xfercommands_silence_the_per_file_progress_meter():
+    # REGRESSION: with an XferCommand set, pacman suppresses its own tidy ( N/total ) bar and
+    # each file is a SEPARATE curl -- so without -s every package prints a full progress-meter
+    # block, flooding the terminal/teed log with no running count (unreadable download phase).
+    # -s silences the meter; -S keeps real errors visible. Both variants must carry -sS.
+    for conf in (pacman.download_conf(), pacman.download_conf(db_sync=True)):
+        xfer = _xfer(conf)
+        assert "-sS" in xfer, "XferCommand must pass -sS to silence curl's per-file meter"
 
 
 def test_db_sync_conf_is_otherwise_a_normal_download_conf():
