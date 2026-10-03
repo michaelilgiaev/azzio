@@ -162,17 +162,13 @@ PASSWORDS_DIR = PACKAGESDIR / "passwords"
 # `backup` rolls the user's top-level home folders (skipping ~/Ignore and dot files,
 # keeping symlinks as links) into ~/backup_<date>.tar.gz.gpg (GPG/AES256).
 BACKUP_DIR = PACKAGESDIR / "backup"
-# The Azzio hypervisor package (per-directory QEMU/KVM VM runner -- the `hypervisor`
-# command): a flat directory holding the entry script (command_line_interface.py), every
-# working module (configuration/configuration_schema/configuration_watcher/
-# configuration_defaults/graphics/checks/qemu_command/virtual_machine) and packaging.py
-# (the build wiring that copies them into the airootfs and installs the
-# /usr/local/bin/hypervisor launcher). A pure-Python app we author, so
-# it lives under libraries/packages/ like backup. `hypervisor` spins up a QEMU/KVM VM
-# whose identity is derived from the directory it is run in (name/disk/NVRAM/shared/SSH),
-# with all settings in a per-directory hypervisor.cfg. HOST-side tool -- distinct from the
-# guest-side `azzio --sshd-hypervisor`.
-HYPERVISOR_DIR = PACKAGESDIR / "hypervisor"
+# qvm (the per-directory QEMU/KVM VM runner -- the `qvm` command) is NO LONGER an inline
+# azzio package. It is its own project (github.com/michaelilgiaev/qvm) and is fetched from
+# GitHub at build time by libraries/qvm_source.py, which owns its checkout location
+# (cache/qvm) and the installed paths (/usr/bin/qvm, /usr/lib/qvm/). There is therefore no
+# in-repo source dir for it here anymore -- the old HYPERVISOR_DIR (packages/hypervisor) is
+# gone along with the inline package. (The guest-side `azzio --sshd-hypervisor` is a
+# separate thing and is unaffected.)
 # The `azzio` guest command line interface is a Python PACKAGE now (libraries/packages/azzio/): it grew a
 # `theme` subcommand (and more to come), so the single module was split into small modules
 # (common, country_table, resolver, theme, sshd, command_line_interface). The single /usr/local/bin/azzio

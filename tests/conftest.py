@@ -23,7 +23,7 @@ for p in (REPO / "libraries", REPO / "scripts" / "libraries"):
         sys.path.insert(0, sp)
 
 # Also put THIS tests/ dir on the path so a test module can import a shared, test-only
-# helper module that sits beside it (e.g. `from hypervisor_helpers import make_cfg`).
+# helper module that sits beside it (e.g. `from <some>_helpers import make_thing`).
 # Under pytest's importlib import mode the rootdir's tests/ dir is NOT added implicitly,
 # so without this a sibling-helper import fails with ModuleNotFoundError. conftest is
 # imported before any test module, so this runs early enough for every test.
