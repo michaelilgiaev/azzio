@@ -183,22 +183,22 @@ xdotool
 # (disabled) config rclone is never invoked. Shipped so the opt-in works out of the box
 # (rclone stores its own OAuth token under ~/.config/rclone). NOT from the AUR.
 rclone
-# qemu-full + edk2-ovmf + virt-viewer: the system binaries the `hypervisor` command
-# (packages/hypervisor/) shells out to. It is a HOST-side tool -- run `hypervisor` inside a
-# directory and it spins up a per-directory QEMU/KVM VM. qemu-full provides
-# `qemu-system-x86_64` (runs the VM) and `qemu-img` (creates the qcow2 disk); edk2-ovmf
-# provides the OVMF UEFI firmware (OVMF_CODE / the OVMF_VARS NVRAM template the VM boots
-# from); virt-viewer provides `remote-viewer` (the SPICE display window). Named explicitly
-# here because the shipped app hard-depends on them (none is pulled in by the baseline: the
-# releng image ships only the GUEST agents qemu-guest-agent/spice-vdagent, not the host
-# emulator). `pgrep` (the running-state check) comes from procps-ng in base. NOT from the AUR.
+# qemu-full + edk2-ovmf + virt-viewer: the system binaries the `qvm` command shells out to.
+# `qvm` (github.com/michaelilgiaev/qvm, baked into the ISO by libraries/qvm_source.py) is a
+# HOST-side tool -- run `qvm` inside a directory and it spins up a per-directory QEMU/KVM VM.
+# qemu-full provides `qemu-system-x86_64` (runs the VM) and `qemu-img` (creates the qcow2
+# disk); edk2-ovmf provides the OVMF UEFI firmware (OVMF_CODE / the OVMF_VARS NVRAM template
+# the VM boots from); virt-viewer provides `remote-viewer` (the SPICE display window). Named
+# explicitly here because the shipped app hard-depends on them (none is pulled in by the
+# baseline: the releng image ships only the GUEST agents qemu-guest-agent/spice-vdagent, not
+# the host emulator). `pgrep` (the running-state check) comes from procps-ng in base. NOT from the AUR.
 qemu-full
 edk2-ovmf
 virt-viewer
 # bash-completion: provides the completion ENGINE + lazy loader that /etc/bash.bashrc
-# sources, which reads /usr/share/bash-completion/completions/ on first TAB. The
-# `hypervisor` command ships its completion there via packages/hypervisor/packaging.py
-# emit_plan(); without this package nothing loads it, so `hypervisor <TAB>` is dead.
+# sources, which reads /usr/share/bash-completion/completions/ on first TAB. The `qvm`
+# command ships its completion there via libraries/qvm_source.py emit_plan(); without this
+# package nothing loads it, so `qvm <TAB>` is dead.
 # Named explicitly because the baseline releng image does not pull it in. NOT from the AUR.
 bash-completion
 go
