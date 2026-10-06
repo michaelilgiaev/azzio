@@ -305,6 +305,13 @@ def test_sync_and_download_uses_safe_conf_for_db_sync(monkeypatch, tmp_path):
 
     # Keep the package list tiny and deterministic (no real manifest / makepkg).
     monkeypatch.setattr(downloader, "downloadable_packages", lambda full_compile=False: ["pkga"])
+    # _sync_and_download now (a) pins the archive host in /etc/hosts and (b) resolves the
+    # download closure with `pacman -Sw --print`. Neither may touch the real host or shell out
+    # in a unit test: stub the pin to a no-op and the count to a fixed number. (Without this the
+    # --print branch would run real pacman and hang, the bug the previous change introduced.)
+    monkeypatch.setattr(downloader, "_pin_archive_host", lambda *a, **k: [])
+    monkeypatch.setattr(downloader, "_resolved_download_count",
+                        lambda *a, **k: 1)
 
     captured = []
 
@@ -329,3 +336,166 @@ def test_sync_and_download_uses_safe_conf_for_db_sync(monkeypatch, tmp_path):
     assert sy_conf != sw_conf, "db sync must use its own conf, not the package conf"
     assert "-C -" not in _xfer_line(sy_conf.read_text()), "db-sync conf must drop -C -"
     assert "-C -" in _xfer_line(sw_conf.read_text()), "package conf must keep -C -"
+
+
+# --- archive-host DNS pin: kill the per-file "Could not resolve host" death ----------------
+#
+# The real "stuck at 6%" failure was NOT the frozen bar -- it was `pacman -Sw` dying mid-fetch
+# on "curl: (6) Could not resolve host: archive.archlinux.org". The ~1200 packages are fetched
+# serially, each a separate curl invocation doing its own DNS lookup, and the QEMU-slirp guest
+# resolver drops one under that burst. _pin_archive_host resolves the single origin ONCE and
+# writes it to /etc/hosts so every lookup is answered locally. These pin the fix WITHOUT
+# touching the real /etc/hosts or the network (a temp hosts file + an injected resolver).
+
+def test_pin_archive_host_writes_resolved_ips(tmp_path):
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1\tlocalhost\n")
+    ips = downloader._pin_archive_host(hosts, resolve=lambda h: ["1.2.3.4", "5.6.7.8"])
+    assert ips == ["1.2.3.4", "5.6.7.8"]
+    body = hosts.read_text()
+    # original content preserved, both IPs mapped to the real archive host, marker present.
+    assert "127.0.0.1\tlocalhost" in body
+    assert f"1.2.3.4\t{downloader.pacman_cfg.ARCHIVE_HOST}" in body
+    assert f"5.6.7.8\t{downloader.pacman_cfg.ARCHIVE_HOST}" in body
+    assert downloader._HOSTS_MARKER in body
+
+
+def test_pin_archive_host_is_idempotent(tmp_path):
+    # The retry ladder / a warm re-run calls this again; it must not stack duplicate lines.
+    hosts = tmp_path / "hosts"
+    hosts.write_text("127.0.0.1\tlocalhost\n")
+    downloader._pin_archive_host(hosts, resolve=lambda h: ["1.2.3.4"])
+    assert downloader._pin_archive_host(hosts, resolve=lambda h: ["9.9.9.9"]) == []
+    # only the first pin's single IP is present; the second call added nothing.
+    assert hosts.read_text().count(downloader.pacman_cfg.ARCHIVE_HOST) == 1
+
+
+def test_pin_archive_host_respects_preexisting_entry(tmp_path):
+    # A hosts entry for the archive host from ANY source means a static answer already exists.
+    hosts = tmp_path / "hosts"
+    hosts.write_text(f"9.9.9.9 {downloader.pacman_cfg.ARCHIVE_HOST}\n")
+    assert downloader._pin_archive_host(hosts, resolve=lambda h: ["1.1.1.1"]) == []
+    assert "1.1.1.1" not in hosts.read_text()
+
+
+def test_pin_archive_host_falls_back_on_resolve_failure(tmp_path):
+    # DNS down at pin time -> no-op, no write, fetch proceeds on live DNS (no worse than before).
+    hosts = tmp_path / "hosts"
+    hosts.write_text("keep me\n")
+
+    def boom(_h):
+        raise OSError("dns down")
+
+    assert downloader._pin_archive_host(hosts, resolve=boom) == []
+    assert hosts.read_text() == "keep me\n"
+
+
+def test_pin_archive_host_tolerates_unwritable_hosts():
+    # Not in a container / no /etc/hosts -> silent no-op, never an exception.
+    assert downloader._pin_archive_host(Path("/nonexistent/dir/hosts"),
+                                        resolve=lambda h: ["1.1.1.1"]) == []
+
+
+def test_pin_archive_host_dedupes_resolved_ips(tmp_path):
+    hosts = tmp_path / "hosts"
+    hosts.write_text("")
+    # a resolver that returns the same IP twice must yield one hosts line.
+    downloader._pin_archive_host(hosts, resolve=lambda h: ["1.2.3.4", "1.2.3.4"])
+    assert hosts.read_text().count("1.2.3.4") == 1
+
+
+def test_sync_and_download_pins_host_before_any_network_call(monkeypatch, tmp_path):
+    # Wiring: the pin must happen BEFORE the -Sy sync (the first network call). We record the
+    # call order of the pin and run_teed and assert the pin is first.
+    workdir = tmp_path / "work"
+    pkg_db = tmp_path / "db"
+    pkg_repo = tmp_path / "repo"
+    (pkg_db / "sync").mkdir(parents=True)
+    pkg_repo.mkdir(parents=True)
+    workdir.mkdir()
+    dlconf = workdir / ".cache-pkgs-pacman.conf"
+
+    monkeypatch.setattr(downloader, "downloadable_packages", lambda full_compile=False: ["pkga"])
+    monkeypatch.setattr(downloader, "_resolved_download_count", lambda *a, **k: 1)
+
+    order = []
+    monkeypatch.setattr(downloader, "_pin_archive_host",
+                        lambda *a, **k: order.append("pin") or [])
+
+    def fake_run_teed(cmd, **kw):
+        order.append("-Sy" if "-Sy" in cmd else "-Sw" if "-Sw" in cmd else "other")
+        return 0
+
+    monkeypatch.setattr(downloader.logstream, "run_teed", fake_run_teed)
+
+    downloader._sync_and_download([], dlconf, tmp_path / "gpg", pkg_db, pkg_repo,
+                                  progress=lambda _p: None)
+    assert order and order[0] == "pin", f"pin must run before any network call, got {order}"
+    assert "-Sy" in order and "-Sw" in order
+
+
+# --- download progress watcher: the bar must climb during the long serial fetch ------------
+#
+# Even with the DNS fix the fetch is minutes of serial download with no per-line stdout (-sS),
+# so the bar would sit frozen at _DL_PERMILLE_LO without a watcher. _watch_download_progress
+# polls the cache dir's finished-package count and sweeps the bar across [LO, HI]. These pin
+# that it maps counts onto the band monotonically and stops promptly when signalled.
+
+def test_watch_download_progress_maps_count_onto_band(tmp_path):
+    import threading
+    pkg_repo = tmp_path / "repo"
+    pkg_repo.mkdir()
+    # 2 already present (baseline), target 6 -> 4 to fetch this run.
+    for n in ("a", "b"):
+        (pkg_repo / f"{n}-1.0-1-x86_64.pkg.tar.zst").write_text("")
+    emitted = []
+    stop = threading.Event()
+
+    # Drop two more files, then let the watcher observe and stop it.
+    (pkg_repo / "c-1.0-1-x86_64.pkg.tar.zst").write_text("")
+    (pkg_repo / "d-1.0-1-x86_64.pkg.tar.zst").write_text("")
+
+    def progress(p):
+        emitted.append(p)
+        stop.set()  # one observation is enough for the assertion
+
+    downloader._watch_download_progress(pkg_repo, target=6, baseline=2,
+                                        progress=progress, phase=lambda _s: None,
+                                        stop=stop, interval=0.01)
+    # 2 of 4 fetched -> halfway across [LO, HI].
+    mid = downloader._DL_PERMILLE_LO + (downloader._DL_PERMILLE_HI - downloader._DL_PERMILLE_LO) // 2
+    assert emitted and emitted[0] == mid, (emitted, mid)
+
+
+def test_watch_download_progress_stops_promptly(tmp_path):
+    import threading, time as _time
+    pkg_repo = tmp_path / "repo"
+    pkg_repo.mkdir()
+    stop = threading.Event()
+    stop.set()  # already stopped -> loop must exit on the first wait() without emitting
+    emitted = []
+    t0 = _time.monotonic()
+    downloader._watch_download_progress(pkg_repo, target=10, baseline=0,
+                                        progress=emitted.append, phase=lambda _s: None,
+                                        stop=stop, interval=5.0)
+    assert _time.monotonic() - t0 < 1.0, "a pre-set stop must return immediately"
+    assert emitted == [], "no progress emitted when stopped before the first tick"
+
+
+def test_watch_download_progress_handles_complete_cache(tmp_path):
+    # baseline == target (nothing to fetch): frac is 1.0, so it pins the top of the band and
+    # never divides by zero.
+    import threading
+    pkg_repo = tmp_path / "repo"
+    pkg_repo.mkdir()
+    emitted = []
+    stop = threading.Event()
+
+    def progress(p):
+        emitted.append(p)
+        stop.set()
+
+    downloader._watch_download_progress(pkg_repo, target=5, baseline=5,
+                                        progress=progress, phase=lambda _s: None,
+                                        stop=stop, interval=0.01)
+    assert emitted and emitted[0] == downloader._DL_PERMILLE_HI
