@@ -125,7 +125,7 @@ Every external host and service the distribution talks to: where it downloads pa
 
 | Endpoint | Purpose | Where / notes |
 |---|---|---|
-| `archive.archlinux.org` | Package download mirror (build-time, hard-coded) | pacman.py -- used by the cache/download step; host-independent |
+| `{ARCHIVE_HOST}` | Package download mirror (build-time, hard-coded) | pacman.py -- used by the cache/download step; host-independent |
 | `/etc/pacman.d/mirrorlist` | Package download mirrors (installed system + live ISO) | pacman.py -- the standard Arch mirrorlist on the running OS |
 | `file:///mnt/pacstrap-azzio-repo/` | Offline package install from the baked-in local repo | pacman.py -- the fully-offline install path |
 | `archlinux.org` | Connectivity probe before enabling time sync | installer.py -- pinged for up to 15s on first boot |
