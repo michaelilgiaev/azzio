@@ -6,3 +6,10 @@ logs.txt
 .git/
 *.iso
 data/
+venv/
+*.qcow2
+*.qcow
+*.img
+*.sock
+__pycache__/
+.pytest_cache/
