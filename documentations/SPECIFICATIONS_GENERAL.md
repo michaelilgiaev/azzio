@@ -8,7 +8,7 @@ Technical, developer-facing specification of the Azzio Linux distribution. It is
 
 - **Base distribution:** Arch Linux (rolling), x86_64
 - **Live session:** Openbox live session; getty autologin -> startx -> openbox-session, auto-launches Calamares
-- **Kernel:** `linux` 7.2.8.arch1-2
+- **Kernel:** `linux` 7.2.9.arch1-1
 - **Init:** `systemd` 262-1
 - **Display manager / session:** None -- getty autologin to startx (no display manager)
 - **ISO versioning:** date-based, YYYY.MM.DD (no semver)
@@ -38,7 +38,7 @@ Technical, developer-facing specification of the Azzio Linux distribution. It is
 
 ## 2. Base and identity
 
-Azzio is [Arch Linux](https://archlinux.org) -- rolling release, `x86_64` -- with a curated package set and Azzio branding/configuration on top. Every package comes unmodified from the official Arch repositories; Arch's own documentation, the [ArchWiki](https://wiki.archlinux.org), applies directly. The kernel is `linux` 7.2.8.arch1-2 and the init system is `systemd` 262-1. The medium is versioned date-based, YYYY.MM.DD (no semver).
+Azzio is [Arch Linux](https://archlinux.org) -- rolling release, `x86_64` -- with a curated package set and Azzio branding/configuration on top. Every package comes unmodified from the official Arch repositories; Arch's own documentation, the [ArchWiki](https://wiki.archlinux.org), applies directly. The kernel is `linux` 7.2.9.arch1-1 and the init system is `systemd` 262-1. The medium is versioned date-based, YYYY.MM.DD (no semver).
 
 Identity is set through `/usr/lib/os-release`: `NAME="Azzio Linux"` with `ID=arch` and `ID_LIKE=arch` kept deliberately -- so tooling that keys off `ID` still treats the system as Arch -- `BUILD_ID=rolling`, and `HOME_URL` pointing at the project repository. The branding is presentational; the system remains Arch underneath.
 
@@ -105,13 +105,13 @@ What the medium can do, grouped by the role each component plays. Counts and siz
 | Graphics & display | 112 | 923.6 MiB | the X11 display server, Mesa/Vulkan drivers, and display configuration |
 | Audio | 44 | 51.3 MiB | the audio server and mixer/control tooling |
 | Networking | 37 | 131.8 MiB | connection management, wireless, VPN, SSH, DNS, and network diagnostics |
-| Storage & filesystems | 46 | 85.3 MiB | partitioning, RAID/LVM, encryption setup, and filesystem/imaging tooling |
+| Storage & filesystems | 46 | 85.6 MiB | partitioning, RAID/LVM, encryption setup, and filesystem/imaging tooling |
 | Security & crypto | 18 | 76.5 MiB | the host firewall, full-disk encryption, TPM/FIDO/smartcard, and OpenPGP |
 | Developer tools | 110 | 1.04 GiB | compilers, build tooling, version control, and developer editors |
-| Language runtime | 28 | 951.1 MiB | language interpreters and runtimes available out of the box |
+| Language runtime | 28 | 951.2 MiB | language interpreters and runtimes available out of the box |
 | Multimedia codec/player | 73 | 239.0 MiB | media players and the codec/plugin stack that decodes and encodes them |
 | Fonts & icons | 21 | 162.2 MiB | console and desktop fonts, cursors, and icon themes |
-| Printing & scanning | 4 | 16.2 MiB | the printing subsystem and its device support |
+| Printing & scanning | 4 | 16.3 MiB | the printing subsystem and its device support |
 | Bluetooth & devices | 12 | 16.8 MiB | Bluetooth, USB, accessibility, and other peripheral device support |
 | Virtualization guest | 6 | 9.2 MiB | guest integration agents for the major hypervisors |
 | Shared library | 365 | 7.00 GiB | shared libraries other components link against |
