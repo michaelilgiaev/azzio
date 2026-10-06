@@ -181,7 +181,7 @@ You can clone this repository and compile the ISO yourself. The first compile ne
 
    **Default compile** (recommended). Compiles only what's necessary. Everything else is downloaded as trusted, verified binaries.
    ```
-   sudo docker run --rm -it --init --privileged \
+   sudo docker run --network=host --rm -it --init --privileged \
      -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
      -v "$PWD/cache:/build/cache" \
      -v "$PWD/output:/build/output" \
@@ -192,7 +192,7 @@ You can clone this repository and compile the ISO yourself. The first compile ne
    **Full compile.** Compiles everything from source, which takes hours.
 
    ```
-   sudo docker run --rm -it --init --privileged \
+   sudo docker run --network=host --rm -it --init --privileged \
      -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
      -v "$PWD/cache:/build/cache" \
      -v "$PWD/output:/build/output" \
