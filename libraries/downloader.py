@@ -17,8 +17,10 @@ and the -Sw download are skipped -- no server is contacted at all.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -67,6 +69,58 @@ _RETRY_BACKOFF = (15, 30, 45, 60, 60)
 
 class PackageError(RuntimeError):
     pass
+
+
+# The `pacman -Sw` download band inside step 12's progress slice (permille of the
+# STEP, as handed to ProgressBar.sub): _sync_and_download opens at 20 and the whole
+# transaction ends at 440 (see build_cache, which calls progress(440) right after).
+# The live watcher below sweeps the bar across [20, 430] as package files land, and
+# the existing progress(440) snaps the last sliver once the download returns. Without
+# this the bar sits frozen at 20 (an apparent "stuck at 6%") for the ENTIRE multi-GB
+# serial fetch from the throttled archive host -- the single longest wait in the build.
+_DL_PERMILLE_LO = 20
+_DL_PERMILLE_HI = 430
+
+
+def _watch_download_progress(pkg_repo: Path, target: int, baseline: int,
+                             progress: ProgressCb, phase: Callable[[str], None],
+                             stop: "threading.Event", interval: float = 2.0) -> None:
+    """Drive the progress bar from the cache dir's package-file count while `pacman -Sw`
+    runs, so the bar visibly climbs instead of freezing for the whole download.
+
+    The curl XferCommand fetch is SERIAL and its per-file output is silenced (-sS) and
+    redrawn in place with \\r, so pacman's "downloading foo..." lines cannot be counted
+    off the teed stdout (see run_teed). The reliable, decoupled signal is the number of
+    finished `*.pkg.tar.zst` files on disk: pacman writes each via a `.part` temp and
+    renames it on completion, so a bare-name match counts only DONE packages.
+
+    target   : how many downloadable packages the manifest wants (len(pkgs)).
+    baseline : package files already present when the download began -- a warm/resumed
+               cache starts part-done, so progress is measured from here, not zero, or
+               the bar would teleport to the end on a near-complete re-run.
+    stop     : set by the caller the instant `-Sw` returns; the loop exits promptly.
+
+    Thread-safe: ProgressBar.sub is monotonic and ProgressBar.draw holds its own lock,
+    so polling from this daemon thread only ever nudges the bar forward. A poll that
+    races a rename at worst reports one stale count, corrected on the next tick."""
+    # Remaining packages to fetch this run. If the cache is already complete (nothing
+    # missing) there is nothing to animate -- the download returns ~instantly anyway.
+    todo = max(target - baseline, 0)
+    last_emitted = -1
+    while not stop.wait(interval):
+        done = len(list(pkg_repo.glob("*.pkg.tar.zst")))
+        fetched = max(done - baseline, 0)
+        if todo:
+            frac = min(fetched / todo, 1.0)
+        else:
+            frac = 1.0
+        permille = _DL_PERMILLE_LO + int(frac * (_DL_PERMILLE_HI - _DL_PERMILLE_LO))
+        progress(permille)
+        # Narrate the live count in the pinned bar's label, but only when it changes,
+        # so the sub-checkpoint log is not spammed with an identical line every tick.
+        if fetched != last_emitted:
+            last_emitted = fetched
+            phase(f"downloading packages into cache ({baseline + fetched}/{target})")
 
 
 def _download_with_retry(attempt: Callable[[int], int],
@@ -258,8 +312,117 @@ def build_cache(workdir: Path, cachedir: Path, offline: bool, progress: Progress
     print("[✓] Package cache is complete and staged (offline-ready, resumable).")
 
 
+def _resolved_download_count(sudo, dlconf, gpgdir, pkg_db, pkg_repo, pkgs) -> int:
+    """How many package FILES `pacman -Sw` will ultimately land for `pkgs` -- the full
+    dependency closure, not just the explicit list. Used as the progress-bar denominator
+    so the download band tracks real completion.
+
+    `pacman -Sw --print` lists one line (a URL) per resolved target and exits WITHOUT
+    downloading, so it is fast (the DB is already synced) and side-effect-free. The
+    explicit `pkgs` expand to the whole closure here (observed: ~700 explicit -> ~1200
+    resolved), so counting these lines is the honest total; len(pkgs) alone undercounts
+    by the entire transitive-dependency set and would peg the bar at 100% of its band
+    while half the bytes are still coming. Returns len(pkgs) as a safe floor if --print
+    fails for any reason -- the watcher still animates, just against a smaller total."""
+    assume = [arg for name in ASSUME_INSTALLED for arg in ("--assume-installed", name)]
+    try:
+        out = subprocess.run(
+            sudo + ["pacman", "-Sw", "--print", "--config", str(dlconf),
+                    "--gpgdir", str(gpgdir), "--noconfirm", "--disable-download-timeout",
+                    "--cachedir", str(pkg_repo), "--dbpath", str(pkg_db)] + assume + pkgs,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return len(pkgs)
+    # Count non-empty stdout lines that look like a package URL/target. pacman prints
+    # provider-selection chatter to stderr (captured separately), so stdout is just the
+    # resolved target list; fall back to the explicit count if it came back empty.
+    lines = [ln for ln in out.stdout.splitlines() if ln.strip()]
+    return len(lines) or len(pkgs)
+
+
+# /etc/hosts marker so a re-run (resumable cache) does not stack duplicate pin lines.
+_HOSTS_MARKER = "# azzio: pinned archive host (see downloader._pin_archive_host)"
+
+
+def _pin_archive_host(hosts_path: Path = Path("/etc/hosts"),
+                      resolve: "Callable[[str], list[str]] | None" = None) -> list[str]:
+    """Resolve the pinned archive origin ONCE and write its IPv4 address(es) into
+    /etc/hosts, so every subsequent curl/pacman lookup is answered from the static file
+    instead of the network resolver. Returns the pinned IPs ([] if nothing was pinned).
+
+    WHY THIS EXISTS -- the actual "stuck at 6%" death. `pacman -Sw` fetches ~1200 packages
+    SERIALLY, each a separate curl invocation under the XferCommand (see pacman.download_conf),
+    and curl does a FRESH DNS lookup per file. On a QEMU user-mode-networking (slirp) guest the
+    only nameserver is the lightweight built-in forwarder (10.0.2.3); under a burst of hundreds
+    of rapid lookups it drops one, curl aborts that file with "curl: (6) Could not resolve
+    host: archive.archlinux.org", and the whole transaction dies mid-download (observed: the
+    build ran ~420s then died on exactly that error). The host resolves fine when asked
+    occasionally -- it is the per-file volume that trips the forwarder. Resolving the single
+    origin ONCE here and pinning it makes all ~1200 lookups hit /etc/hosts: zero DNS traffic
+    during the fetch, so a flaky forwarder can no longer kill the build.
+
+    SAFE and SELF-HEALING: the host is a SINGLE origin (pacman.ARCHIVE_HOST), so pinning one
+    IP loses nothing a live lookup would have given. We resolve through the SAME resolver the
+    build would otherwise use, so the pinned IP is as fresh as DNS can offer; if the origin's
+    IP ever rotated mid-build the resumable --cachedir + retry ladder re-fetch only what is
+    missing on the next run. A no-op (returns []) when: resolution fails (fall back to live
+    DNS -- strictly no worse than before), the marker is already present (idempotent across
+    the retry ladder / a warm re-run), or /etc/hosts is not writable (e.g. not in a container);
+    in every one of those cases the fetch simply proceeds on normal DNS."""
+    host = pacman_cfg.ARCHIVE_HOST
+    resolve = resolve or _resolve_ipv4
+    try:
+        existing = hosts_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    # Idempotent: our own prior pin, OR a hosts entry for the archive host from any source,
+    # means there is already a static answer -- do not append another.
+    if _HOSTS_MARKER in existing or any(
+        host in line.split("#", 1)[0].split() for line in existing.splitlines()
+    ):
+        return []
+    try:
+        ips = resolve(host)
+    except OSError:
+        return []
+    # De-dupe, preserving resolver order: getaddrinfo can repeat an A record, and an injected
+    # resolver might too -- a pinned host must map to each IP exactly once.
+    ips = list(dict.fromkeys(ips))
+    if not ips:
+        return []
+    block = "\n" + _HOSTS_MARKER + "\n" + "".join(f"{ip}\t{host}\n" for ip in ips)
+    try:
+        with hosts_path.open("a", encoding="utf-8") as fh:
+            fh.write(block)
+    except OSError:
+        return []
+    print(f"[*] Pinned {host} -> {', '.join(ips)} in {hosts_path} "
+          f"(avoids per-file DNS during the serial package fetch).")
+    return ips
+
+
+def _resolve_ipv4(host: str) -> list[str]:
+    """All distinct IPv4 addresses for `host`, in resolver order. The download forces curl
+    `-4` (see pacman._CURL_COMMON), so only A records matter; a pinned AAAA the guest cannot
+    route would reintroduce the very failover stall `-4` exists to avoid."""
+    infos = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
+    seen: list[str] = []
+    for info in infos:
+        ip = info[4][0]
+        if ip not in seen:
+            seen.append(ip)
+    return seen
+
+
 def _sync_and_download(sudo, dlconf, gpgdir, pkg_db, pkg_repo, progress, phase=lambda _s: None,
                        full_compile: bool = False) -> None:
+    # Pin the single archive origin's IPv4 into /etc/hosts BEFORE any network call, so the
+    # db sync and the ~1200-package serial fetch answer every DNS lookup from the static file
+    # instead of the flaky QEMU-slirp forwarder that otherwise kills the build mid-download
+    # with "curl: (6) Could not resolve host" (see _pin_archive_host). No-op off-container or
+    # if resolution fails -- the fetch then just uses live DNS, exactly as before.
+    _pin_archive_host()
     phase("syncing package databases")
     print("[*] Syncing package databases...")
     # The db sync (-Sy) fetches MUTABLE databases, so it must NOT use the resumable (-C -)
@@ -294,8 +457,18 @@ def _sync_and_download(sudo, dlconf, gpgdir, pkg_db, pkg_repo, progress, phase=l
     pkgs = downloadable_packages(full_compile)
 
     print("[*] Downloading missing packages into the persistent cache (resumable)...")
-    phase(f"downloading {len(pkgs)} packages into cache")
-    progress(20)
+    progress(_DL_PERMILLE_LO)
+    # Count packages already on disk so a warm/resumed cache animates from where it left
+    # off, not from zero (see _watch_download_progress). Glob the bare names: finished
+    # packages only, never the in-flight `.part` temps.
+    baseline = len(list(pkg_repo.glob("*.pkg.tar.zst")))
+    # The honest progress denominator is the full resolved closure, not the explicit
+    # manifest list (the latter undercounts by every transitive dependency). Resolve it
+    # once up front with --print (no download). Needs a conf on disk; write the default
+    # rung now (the retry loop rewrites it per attempt anyway).
+    _write_download_conf(dlconf, parallel_downloads=_PARALLEL_LADDER[0])
+    total = _resolved_download_count(sudo, dlconf, gpgdir, pkg_db, pkg_repo, pkgs)
+    phase(f"downloading packages into cache ({baseline}/{total})")
 
     def _attempt(parallel: int) -> int:
         # Rewrite the SAME download conf with this rung's parallelism (pacman has no
@@ -320,7 +493,24 @@ def _sync_and_download(sudo, dlconf, gpgdir, pkg_db, pkg_repo, progress, phase=l
     # Retry down the parallelism ladder: archive.archlinux.org throttles aggressive
     # pulls, and the resumable cachedir makes each gentler retry cheap -- see
     # _download_with_retry / _PARALLEL_LADDER. Raises PackageError if every rung fails.
-    _download_with_retry(_attempt)
+    #
+    # While it runs, a daemon thread sweeps the bar across the download band by polling
+    # the cache dir's finished-package count, so the pinned bar climbs live instead of
+    # freezing at _DL_PERMILLE_LO for the whole serial multi-GB fetch (the "stuck at 6%"
+    # symptom). The watcher is purely observational -- it never touches the download --
+    # so it is stopped and joined on EVERY exit path, success or PackageError.
+    stop = threading.Event()
+    watcher = threading.Thread(
+        target=_watch_download_progress,
+        args=(pkg_repo, total, baseline, progress, phase, stop),
+        name="pkg-download-progress", daemon=True,
+    )
+    watcher.start()
+    try:
+        _download_with_retry(_attempt)
+    finally:
+        stop.set()
+        watcher.join(timeout=5)
     progress(440)
 
 

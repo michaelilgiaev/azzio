@@ -38,11 +38,22 @@ from __future__ import annotations
 # package set are drawn from one self-consistent point in time.
 ARCH_SNAPSHOT = "2026/08/10"
 
+# The single origin host the pinned snapshot is served from. It is a SINGLE box (no CDN /
+# round-robin pool), which is why the download code treats it as slow-and-flaky and retries
+# hard (see downloader._PARALLEL_LADDER). The downloader also PINS this hostname's resolved
+# IPv4 into /etc/hosts for the duration of the fetch (downloader._pin_archive_host): the ~1200
+# packages are fetched SERIALLY, each as a separate curl invocation doing its OWN DNS lookup,
+# and on a QEMU-slirp guest the lightweight built-in resolver drops one of those hundreds of
+# rapid lookups and kills the whole `pacman -Sw` with "curl: (6) Could not resolve host".
+# Resolving once and pinning removes the per-file lookup entirely. Sole source of truth for the
+# hostname -- _SNAPSHOT_MIRRORS (below) is built from it, so the two can never drift.
+ARCHIVE_HOST = "archive.archlinux.org"
+
 # ALA snapshot mirror lines (both a primary and the canonical archive host as fallback).
 # SigLevel=Never at download time makes the possibly-old package signatures a non-issue;
 # final trust is re-established at pacstrap against the file:// local repo.
 _SNAPSHOT_MIRRORS = (
-    f"Server = https://archive.archlinux.org/repos/{ARCH_SNAPSHOT}/$repo/os/$arch\n"
+    f"Server = https://{ARCHIVE_HOST}/repos/{ARCH_SNAPSHOT}/$repo/os/$arch\n"
 )
 
 # Header shared by the base/profile/pacstrap variants (verbatim Arch default).
