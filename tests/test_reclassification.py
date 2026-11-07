@@ -97,7 +97,7 @@ def test_the_upstream_tailoring_packages_live_under_packages():
     # with an __init__.py, and import as `from packages import <name>`.
     packages_dir = paths.PACKAGESDIR
     for name in ("fastfetch", "librewolf", "openbox", "kitty", "gedit", "file_manager",
-                 "vlc", "gimp", "xviewer", "libreoffice"):
+                 "vlc", "gimp", "xviewer", "libreoffice", "qemu"):
         assert (packages_dir / name / "__init__.py").is_file(), (
             f"packages/{name}/__init__.py must exist so the package loads"
         )

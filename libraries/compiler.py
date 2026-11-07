@@ -72,6 +72,7 @@ from packages import openbox
 from packages import fastfetch
 from packages import librewolf
 from packages import gedit
+from packages import qemu
 # The home-directory LAYOUT data (dirs/links/trash; no emit_plan) lives on the file_manager
 # package (the file manager's sidebar is built from the same list), so _emit_homedir reads it there.
 from packages.file_manager import home_directory
@@ -599,8 +600,13 @@ def run(bar: ProgressBar, offline: bool, reclaim_after_mkarchiso,
     # identical after-pacstrap cure: NoExtract'd (libraries/pacman.py) and copied in by the
     # customize hook. The replacement bodies are staged under root/azzio/apps/ in
     # _emit_apps (step 8); here we append their plant/remove lines to the hook.
+    # packages/qemu removes qemu-block-gluster after pacstrap. qemu-full 11.0 pulled
+    # that split package in; qemu-common 11.1 conflicts with it, and a noninteractive
+    # upgrade will not remove it. The shell lives in the package module.
     emit.write_exec(airootfs / "root/customize_airootfs.sh",
-                    system.CUSTOMIZE_AIROOTFS + pacman.app_override_cp_sh())
+                    system.CUSTOMIZE_AIROOTFS
+                    + qemu.drop_block_gluster_sh()
+                    + pacman.app_override_cp_sh())
     # Overlay the releng `archiso` hostname with `azzio` (prompt + fastfetch title).
     emit.write_text(airootfs / "etc/hostname", system.HOSTNAME)
 
